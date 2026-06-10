@@ -58,3 +58,12 @@ master.srt
 takes_packed.md
 edl.json
 project.md
+PM/
+
+# QA / test artifacts dumped into the repo root (screenshots, Playwright cache, test logs)
+# NOTE: /*.png is root-anchored — it ignores only root-level screenshots and does
+# NOT affect committed assets under studio/ or static/ (e.g. static/video-use-banner.png).
+/*.png
+.playwright-mcp/
+test-server.log
+*-test*.log

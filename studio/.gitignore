@@ -1,0 +1,22 @@
+# video-use Studio — local gitignore (scoped to studio/)
+#
+# The repo-root .gitignore already covers .env, __pycache__, .venv, etc.
+# This file adds Studio-specific runtime state that must never be committed.
+
+# Studio virtualenv (created by start.bat / start.sh)
+.venv/
+
+# All runtime-generated state lives here (token, sessions, in-flight uploads).
+# See ARCHITECTURE.md §3 for the layout.
+.runtime/
+
+# Local config written on first run (host/port/roots/limits).
+config.toml
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

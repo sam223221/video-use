@@ -1,0 +1,47 @@
+# video-use Studio — example configuration
+#
+# Copy to studio/config.toml and edit, OR let the app write a config.toml on
+# first run. start.bat does NOT require this file; sensible defaults apply.
+# Every value here can also be supplied via an environment variable (the env
+# var wins). settings.py (owned by the Backend Engineer) resolves these.
+
+[server]
+# Interface uvicorn binds. 0.0.0.0 = reachable on the LAN (required for phone
+# access). Override with env STUDIO_HOST.
+host = "0.0.0.0"
+# TCP port. Memorable, rarely-used high port. Override with env STUDIO_PORT.
+# If you change this, also update the firewall rule (see open-firewall.ps1).
+port = 8420
+
+[paths]
+# Folders the file browser / uploads / media serving are allowed to touch.
+# Path-traversal is rejected outside these roots (ARCHITECTURE.md §9.2).
+# studio/.runtime/uploads is always appended automatically.
+# Use forward slashes OR escaped backslashes for Windows paths so TOML does
+# not treat backslashes as escape sequences.
+# Example (Windows): allowed_roots = ["C:\\Users\\you\\Videos"]
+# Example (storage drive): allowed_roots = ["A:/Kivia"]
+allowed_roots = []
+# Optional pre-selected folder the browser opens to (one of the roots above).
+# footage_dir = "A:/Kivia"
+
+[limits]
+# Per-file upload cap in bytes. Default 8 GiB. Override with env STUDIO_MAX_UPLOAD.
+max_upload_bytes = 8589934592
+# Default chunk size for resumable uploads (8 MiB).
+upload_chunk_bytes = 8388608
+
+[users]
+# Multi-user login accounts. Copy this file to studio/config.toml (gitignored)
+# and replace these PLACEHOLDERS with your real usernames/passwords. Each entry
+# is  username = "password"  (case-sensitive). Add as many as you like.
+# Passwords are compared in constant time and are never logged.
+#
+# The legacy single account (env STUDIO_USERNAME / STUDIO_PASSWORD or an [auth]
+# table) still works and is merged in as one additional account.
+alice = "change-me-please"
+bob = "another-strong-password"
+
+# [auth]  (legacy single account — optional; the [users] table above is preferred)
+# username = "admin"
+# password = "change-me"

@@ -1,0 +1,63 @@
+# ===========================================================================
+#  video-use Studio - Docker Compose (API-KEY run path)
+#
+#  Run from the studio/ directory:
+#     docker compose up --build
+#
+#  This is the ALTERNATIVE to the native start.bat launcher. Differences:
+#    * The agent bills a pay-as-you-go ANTHROPIC_API_KEY (set it in the repo
+#      .env) - NOT the Claude MAX subscription.
+#    * ffmpeg is the container's CPU-only apt build - renders are slower.
+#    * Footage must live under the mounted folder (FOOTAGE_DIR -> /footage).
+#
+#  Build context is the repo root (..) so the Dockerfile can copy helpers/,
+#  SKILL.md and pyproject.toml that live outside studio/.
+# ===========================================================================
+
+services:
+  studio:
+    build:
+      context: ..
+      dockerfile: studio/Dockerfile
+    image: video-use-studio:latest
+    container_name: video-use-studio
+    ports:
+      # Host 8420 -> container 8420. Reachable on the LAN like the native path;
+      # open the firewall once (see open-firewall.ps1 / README).
+      - "8420:8420"
+    env_file:
+      # Pulls ELEVENLABS_API_KEY (for transcription) AND ANTHROPIC_API_KEY (for
+      # the agent in this run path) from the repo-root .env. Set both there.
+      # You can also put STUDIO_USERNAME / STUDIO_PASSWORD / STUDIO_SECRET in
+      # that same .env (it is gitignored) instead of in the environment: block.
+      - ../.env
+    # --- Auth ----------------------------------------------------------------
+    # Auth is a signed httpOnly `studio_session` cookie issued by POST
+    # /api/login (HMAC-SHA256); there is NO token-in-URL. Sign in from the
+    # browser with a configured username + password.
+    #
+    # Provide a login account one of two ways (do NOT hardcode secrets here):
+    #   1. Env (simplest): set STUDIO_USERNAME / STUDIO_PASSWORD (and optionally
+    #      STUDIO_SECRET, the cookie signing key) in the repo-root .env. They are
+    #      picked up via `env_file: ../.env` above - intentionally NOT re-listed
+    #      under `environment:` so an unset value can't clobber the .env value
+    #      with an empty string.
+    #   2. Mount a config.toml with a [users] table (multiple accounts). See the
+    #      optional volume mount below; this overrides the env account.
+    # If neither is set, the app generates an `admin` account and prints the
+    # one-time password to the container logs (startup banner).
+    environment:
+      STUDIO_HOST: 0.0.0.0
+      STUDIO_PORT: 8420
+      # In-container browse/footage root = the mounted volume below.
+      STUDIO_ALLOWED_ROOTS: /footage
+    volumes:
+      # Mount a host footage folder into the container. Set FOOTAGE_DIR to an
+      # absolute host path; defaults to ../footage relative to studio/.
+      # Everything Studio is allowed to read/write lives under here.
+      - "${FOOTAGE_DIR:-../footage}:/footage:rw"
+      # Optional: mount a host config.toml (with a [users] table) read-only to
+      # define multiple login accounts instead of the single env account above.
+      # Uncomment and point at your gitignored config:
+      # - "./config.toml:/app/studio/config.toml:ro"
+    restart: unless-stopped

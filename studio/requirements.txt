@@ -1,0 +1,37 @@
+# video-use Studio — backend Python dependencies (PINNED)
+#
+# Phase-0 verified: all of these install cleanly on Python 3.14 with prebuilt
+# wheels. Do NOT loosen these pins without re-running the Phase-0 smoke test.
+#
+# Footprint note: the first install downloads ~90 MB+ (uvicorn[standard] pulls
+# in httptools/websockets/watchfiles, claude-agent-sdk pulls its own tree, and
+# pillow is a large wheel). start.bat only runs the install when the venv is
+# missing or the marker file is stale, so subsequent launches are fast.
+
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+python-multipart==0.0.29
+qrcode[pil]==8.2
+claude-agent-sdk==0.2.87
+
+# Pinned transitively-required wheel for reproducibility (qrcode[pil] -> pillow).
+pillow==12.2.0
+
+# helper runtime deps (used by helpers/*.py via runner.py)
+#
+# runner.py launches helpers/*.py with sys.executable (this venv's python), so
+# the helpers' imports must resolve here, NOT only in the system python where the
+# parent `pip install -e .` put them. These mirror the parent pyproject.toml
+# [project].dependencies and resolve cleanly on Python 3.14.
+#   - requests:    transcribe.py (ElevenLabs HTTP) -> transcribe_batch.py
+#   - numpy:       timeline_view.py (audio envelope / waveform)
+#   - matplotlib:  declared by the skill's dependency set (optional plotting path)
+#   - librosa:     declared by the skill's dependency set; helpers fall back to
+#                  stdlib `wave` for the core path, so this is for completeness.
+#                  Pulls a heavy tree (scipy, numba, soundfile, scikit-learn) —
+#                  all confirmed to have cp314 wheels.
+# pillow is already pinned above (shared with qrcode[pil]).
+requests==2.34.2
+numpy==2.4.6
+matplotlib==3.10.9
+librosa==0.11.0

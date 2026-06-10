@@ -1,0 +1,71 @@
+# Docker build context is the REPO ROOT (see studio/Dockerfile). Keep the
+# context small and never leak secrets or local state into the image.
+
+# Secrets (the API keys flow in via compose env_file at RUN time, not build time)
+.env
+.env.local
+*.pem
+*.key
+
+# Studio runtime state + local venv
+studio/.runtime/
+studio/.venv/
+studio/config.toml
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments anywhere
+.venv/
+venv/
+env/
+ENV/
+
+# Editing artifacts (Hard Rule 12 outputs - never needed in the image)
+edit/
+transcripts/
+animations/
+clips_graded/
+clips_preview/
+downloads/
+verify/
+preview.mp4
+final.mp4
+base.mp4
+base_preview.mp4
+master.srt
+takes_packed.md
+edl.json
+project.md
+
+# Node / Remotion (installed on demand, not vendored)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Media render scratch + logs
+media/
+*.log
+
+# VCS / editor / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# PM context + repo docs not needed at runtime
+PM/
+poster.html
+install.md

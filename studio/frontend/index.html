@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0b0a09" />
+  <meta name="description" content="video-use Studio — edit any video by conversation." />
+  <title>video-use Studio</title>
+
+  <!-- Inline SVG favicon (orange brand mark + play triangle) as a data-URI: zero
+       extra network requests and no /favicon.ico 404. '#' is encoded as %23 so the
+       data-URI parses. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a00'/%3E%3Cpath d='M12 9.5l11 6.5-11 6.5z' fill='%231a0d00'/%3E%3C/svg%3E" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a00'/%3E%3Cpath d='M12 9.5l11 6.5-11 6.5z' fill='%231a0d00'/%3E%3C/svg%3E" />
+
+  <!-- Preload the display + body faces so the first paint is on-brand (not Inter). -->
+  <link rel="preload" href="/static/assets/fonts/space-grotesk-600.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/static/assets/fonts/public-sans-400.woff2" as="font" type="font/woff2" crossorigin />
+
+  <!-- Cache-busting version query: buildless app has no hashed filenames, so bump
+       ?v= whenever styles.css/app.js change to guarantee browsers fetch the new
+       asset instead of a stale cached copy (a stale styles.css once shipped a
+       blank-screen view-switcher bug). -->
+  <link rel="stylesheet" href="/static/styles.css?v=11" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <!-- stale-frontend banner: shown by app.js ONLY when /api/me reports a
+       NEWER asset_version than this page is running (never on null/equal/older).
+       Dismissible per-version; Refresh = location.reload(). -->
+  <div class="update-banner" id="update-banner" hidden role="status">
+    <span class="update-banner__text">Studio was updated — refresh to get the latest.</span>
+    <button class="btn btn--primary btn--sm" id="update-refresh" type="button">Refresh</button>
+    <button class="icon-btn update-banner__close" id="update-dismiss" type="button" aria-label="Dismiss update notice">
+      <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+    </button>
+  </div>
+
+  <div id="app" data-view="loading">
+
+    <!-- ===================================================================
+         LOADING / BOOT SPLASH
+    ==================================================================== -->
+    <div id="view-loading" data-view aria-busy="true" aria-live="polite">
+      <span class="brand__mark brand__mark--lg boot-mark" aria-hidden="true"></span>
+      <span class="spinner" role="status" aria-label="Loading video-use Studio"></span>
+      <p class="mono" style="color:var(--ink-faint);font-size:.85rem">Booting Studio…</p>
+    </div>
+
+    <!-- ===================================================================
+         LOGIN VIEW
+    ==================================================================== -->
+    <main id="view-login" data-view>
+      <section class="login" aria-labelledby="login-title">
+        <header class="login__head">
+          <span class="brand">
+            <span class="brand__mark brand__mark--lg" aria-hidden="true"></span>
+          </span>
+          <div>
+            <h1 id="login-title" class="login__title">video-use <span style="color:var(--accent)">Studio</span></h1>
+            <span class="login__deco" aria-hidden="true"></span>
+            <p class="login__sub">Sign in to your editing console. Edit any video by conversation — transcribe, cut, grade, caption.</p>
+          </div>
+        </header>
+
+        <div class="login__card">
+          <form id="login-form" class="login__form" novalidate autocomplete="on">
+            <div class="field">
+              <label for="login-username">Username</label>
+              <input class="input" id="login-username" name="username" type="text"
+                     autocomplete="username" autocapitalize="none" autocorrect="off"
+                     spellcheck="false" required inputmode="text" />
+            </div>
+
+            <div class="field">
+              <label for="login-password">Password</label>
+              <div class="input-wrap">
+                <input class="input" id="login-password" name="password" type="password"
+                       autocomplete="current-password" required />
+                <button type="button" class="icon-btn reveal" id="login-reveal"
+                        aria-pressed="false" aria-label="Show password">
+                  <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-eye"></use></svg>
+                </button>
+              </div>
+            </div>
+
+            <p class="form-error" id="login-error" role="alert" aria-live="assertive">
+              <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+              <span id="login-error-text">Invalid credentials.</span>
+            </p>
+
+            <div class="login__row">
+              <label class="checkbox">
+                <input type="checkbox" id="login-remember" name="remember" checked />
+                Remember me
+              </label>
+            </div>
+
+            <button type="submit" class="btn btn--primary btn--block" id="login-submit">
+              <span class="btn__label">Sign in</span>
+            </button>
+          </form>
+        </div>
+
+        <p class="login__foot">
+          Local LAN tool · sign in once on your phone after scanning the launcher <code>QR</code>.
+        </p>
+      </section>
+    </main>
+
+    <!-- ===================================================================
+         SESSIONS VIEW — pick / create a session before editing
+    ==================================================================== -->
+    <main id="view-sessions" data-view aria-labelledby="sessions-title">
+      <div class="sessions">
+        <header class="sessions__head">
+          <span class="brand">
+            <span class="brand__mark" aria-hidden="true"></span>
+            <span class="brand__name">video<b>use</b> Studio</span>
+          </span>
+          <div class="sessions__head-right">
+            <span class="sessions__user" id="sessions-username" title="Signed in as" hidden></span>
+            <button class="icon-btn" id="sessions-logout" aria-label="Sign out">
+              <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-logout"></use></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="sessions__intro">
+          <h1 id="sessions-title" class="sessions__title">Your sessions</h1>
+          <p class="sessions__sub">Each session is its own project — upload footage into it and edit by conversation. You only see your own.</p>
+        </div>
+
+        <!-- dismissible "How it works" onboarding card (populated by sessions.js;
+             dismissal persists in localStorage) -->
+        <div id="howitworks-mount"></div>
+
+        <div class="sessions__create">
+          <label class="sr-only" for="session-name">New session name</label>
+          <input class="input" id="session-name" type="text" inputmode="text"
+                 placeholder="Name a new session… e.g. “Launch film”"
+                 autocomplete="off" autocapitalize="sentences" spellcheck="false"
+                 maxlength="80" />
+          <button class="btn btn--primary" id="session-create" type="button">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-folder-plus"></use></svg>
+            <span>New session</span>
+          </button>
+        </div>
+
+        <div class="sessions__listhead">
+          <h2 class="sessions__listtitle">Open a session</h2>
+          <button class="icon-btn" id="sessions-refresh" aria-label="Refresh sessions" style="width:2.2rem;height:2.2rem">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-refresh"></use></svg>
+          </button>
+        </div>
+
+        <div class="sessions__list" id="sessions-list" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <!-- ===================================================================
+         DASHBOARD VIEW
+    ==================================================================== -->
+    <div id="view-dashboard" data-view>
+
+      <!-- top bar -->
+      <header class="topbar">
+        <button class="icon-btn topbar__menu" id="drawer-open" aria-label="Open project panel"
+                aria-controls="drawer" aria-expanded="false">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-menu"></use></svg>
+        </button>
+
+        <!-- labeled back affordance (visible text, not a bare rotated arrow).
+             Two label variants: "Sessions" on tablet/desktop, the shorter
+             "Back" on phone so the session-name pill keeps readable width at
+             390px (CSS swaps them; aria-label carries the full meaning). -->
+        <button class="btn btn--ghost topbar__back" id="back-to-sessions" aria-label="Back to sessions">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+          <span class="topbar__back-label topbar__back-label--long">Sessions</span>
+          <span class="topbar__back-label topbar__back-label--short" aria-hidden="true">Back</span>
+        </button>
+
+        <span class="brand">
+          <span class="brand__mark" aria-hidden="true"></span>
+          <span class="brand__name">video<b>use</b> Studio</span>
+        </span>
+
+        <!-- session name: visible at EVERY breakpoint (truncates on phone) -->
+        <span class="topbar__session" id="topbar-session" title="Active session">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-folder"></use></svg>
+          <span id="topbar-session-text">No session</span>
+        </span>
+
+        <span class="topbar__spacer"></span>
+
+        <div class="statuscluster" id="status-cluster" aria-label="System status"></div>
+
+        <span class="topbar__user" id="topbar-user" title="Signed in as"></span>
+
+        <!-- 1-tap upload (phone only): opens the project drawer at Add footage -->
+        <button class="icon-btn topbar__upload" id="topbar-upload" aria-label="Add footage">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-upload"></use></svg>
+        </button>
+
+        <button class="icon-btn topbar__preview-toggle" id="sheet-open" aria-label="Open preview"
+                aria-controls="sheet" aria-expanded="false">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-play"></use></svg>
+        </button>
+
+        <button class="icon-btn" id="logout-btn" aria-label="Sign out">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-logout"></use></svg>
+        </button>
+      </header>
+
+      <!-- main grid: panel | chat | preview -->
+      <div class="dash">
+
+        <!-- ===== PROJECT PANEL ===== -->
+        <!-- Section order mirrors the journey: Add footage → Clips → Outputs,
+             with System demoted to a compact footer row. -->
+        <aside class="panel" id="panel" aria-label="Project">
+          <div class="panel__scroll">
+
+            <!-- step 1: add footage -->
+            <section class="section" aria-labelledby="sec-upload">
+              <div class="section__head"><h3 id="sec-upload">Add footage</h3></div>
+              <div id="upload-mount"></div>
+              <!-- post-upload "what's next?" card (populated by panel.js) -->
+              <div id="nextstep-mount"></div>
+            </section>
+
+            <!-- clips / inventory -->
+            <section class="section" aria-labelledby="sec-clips">
+              <div class="section__head">
+                <h3 id="sec-clips">Clips</h3>
+                <span class="count" id="clips-count">0</span>
+                <button class="icon-btn" id="clips-refresh" aria-label="Refresh clips" style="width:2.75rem;height:2.75rem">
+                  <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-refresh"></use></svg>
+                </button>
+              </div>
+              <div id="job-mount"></div>
+              <div class="clips" id="clips" aria-live="polite"></div>
+              <button class="btn btn--block" id="transcribe-all" disabled>
+                <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-mic"></use></svg>
+                Transcribe all
+              </button>
+              <p class="section__hint">Turns speech into text so the editor can cut by what’s said and make subtitles. Skip for music or montage footage.</p>
+            </section>
+
+            <!-- outputs -->
+            <section class="section" aria-labelledby="sec-outputs">
+              <div class="section__head"><h3 id="sec-outputs">Outputs</h3>
+                <button class="icon-btn" id="outputs-refresh" aria-label="Refresh outputs" style="width:2.75rem;height:2.75rem">
+                  <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-refresh"></use></svg>
+                </button>
+              </div>
+              <div class="outputs" id="outputs" aria-live="polite"></div>
+            </section>
+
+            <!-- system status — compact footer (demoted; plain-language labels
+                 come from status.js: Video engine / Transcription key / Editor login) -->
+            <section class="section section--footer" aria-labelledby="sec-status">
+              <div class="section__head"><h3 id="sec-status">System</h3>
+                <button class="icon-btn" id="status-refresh" aria-label="Refresh system status" style="width:2.75rem;height:2.75rem">
+                  <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-refresh"></use></svg>
+                </button>
+              </div>
+              <div class="statusrows" id="status-rows" aria-live="polite"></div>
+            </section>
+
+          </div>
+        </aside>
+
+        <!-- ===== CHAT ===== -->
+        <main class="chat" id="main" aria-label="Editor chat">
+          <!-- the red thread: 4-step journey stepper (rendered by guide.js) -->
+          <nav class="stepper" id="guide-stepper" aria-label="Your editing steps"></nav>
+
+          <div class="chat__log" id="chat-log" role="log" aria-live="polite" aria-relevant="additions text">
+            <div class="chat__inner" id="chat-inner"></div>
+          </div>
+
+          <div class="composer" id="composer">
+            <div class="composer__inner">
+              <label class="sr-only" for="composer-text">Message the editor</label>
+              <textarea class="composer__text" id="composer-text" rows="1"
+                        placeholder="Describe the edit you want… e.g. “make a 60s launch cut, warm grade, bold subtitles”"></textarea>
+              <button class="btn btn--primary composer__send" id="composer-send" aria-label="Send message">
+                <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-send"></use></svg>
+              </button>
+              <button class="btn btn--danger composer__send" id="composer-cancel" aria-label="Stop generating" hidden>
+                <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-stop"></use></svg>
+              </button>
+            </div>
+            <div class="composer__hint">
+              <span><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for newline</span>
+              <span id="composer-status"></span>
+            </div>
+          </div>
+        </main>
+
+        <!-- ===== PREVIEW ===== -->
+        <aside class="preview" id="preview" aria-label="Preview">
+          <div class="preview__scroll">
+            <div class="preview__head">
+              <svg class="icon" aria-hidden="true" style="color:var(--accent)"><use href="/static/assets/icons.svg#i-play"></use></svg>
+              <h2>Preview</h2>
+              <!-- the journey's ending: download the rendered video (href/label
+                   managed by preview.js; prefers the final render) -->
+              <a class="btn btn--primary btn--sm preview__download" id="preview-download" hidden download>
+                <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-download"></use></svg>
+                <span id="preview-download-label">Download</span>
+              </a>
+            </div>
+
+            <div class="preview__select">
+              <label class="sr-only" for="preview-select">Choose output</label>
+              <select class="select" id="preview-select" aria-label="Choose output to preview">
+                <option value="">No outputs yet</option>
+              </select>
+            </div>
+
+            <!-- data-empty ships "true" so the sourceless video's controls are
+                 hidden under the placeholder from the FIRST paint (preview.js
+                 flips it once an output loads) -->
+            <div class="video-frame" id="video-frame" data-empty="true">
+              <video id="preview-video" controls playsinline preload="metadata"></video>
+              <div class="video-empty" id="video-empty">
+                <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-film"></use></svg>
+                <span>Renders will play here.<br>Ask the editor for a preview.</span>
+              </div>
+            </div>
+
+            <div class="preview__meta" id="preview-meta"></div>
+
+            <!-- frame checks (advanced): collapsed by default -->
+            <details class="section adv" id="verify-section" hidden>
+              <summary class="adv__summary">
+                <svg class="icon adv__chev" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+                <h3 id="sec-verify">Frame checks</h3>
+              </summary>
+              <div class="adv__body">
+                <div class="verifystrip" id="verify-strip"></div>
+              </div>
+            </details>
+          </div>
+        </aside>
+
+      </div>
+
+      <!-- mount points: panel/preview are MOVED here on small screens -->
+      <div class="scrim" id="scrim"></div>
+
+      <aside class="drawer" id="drawer" role="dialog" aria-modal="true"
+             aria-label="Project" data-open="false" hidden>
+        <div class="drawer__head">
+          <span class="drawer__title">Project</span>
+          <button class="icon-btn" id="drawer-close" aria-label="Close project panel">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+          </button>
+        </div>
+        <div id="drawer-mount" style="flex:1 1 auto; min-height:0; display:flex; flex-direction:column;"></div>
+      </aside>
+
+      <section class="sheet" id="sheet" role="dialog" aria-modal="true"
+               aria-label="Preview" data-open="false" hidden>
+        <span class="sheet__grab" aria-hidden="true"></span>
+        <div class="sheet__head">
+          <span class="sheet__title">Preview</span>
+          <button class="icon-btn" id="sheet-close" aria-label="Close preview">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+          </button>
+        </div>
+        <div class="sheet__body" id="sheet-mount"></div>
+      </section>
+
+    </div><!-- /#view-dashboard -->
+
+  </div><!-- /#app -->
+
+  <!-- session confirm dialog (delete) — populated by sessions.js -->
+  <div class="confirm" id="session-confirm" data-open="false" hidden></div>
+
+  <!-- post-login stale-cleanup modal — populated by sessions.js -->
+  <div class="stale" id="stale-modal" data-open="false" hidden></div>
+
+  <!-- lightbox for verify PNGs -->
+  <div class="lightbox" id="lightbox" data-open="false" role="dialog" aria-modal="true" aria-label="Frame preview">
+    <button class="icon-btn lightbox__close" id="lightbox-close" aria-label="Close">
+      <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+    </button>
+    <img id="lightbox-img" alt="" />
+    <span class="lightbox__cap mono" id="lightbox-cap"></span>
+  </div>
+
+  <!-- toasts -->
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ===================================================================
+       BOOT WATCHDOG (classic script, no imports — always runs)
+       -------------------------------------------------------------------
+       app.js is an ES module: if it (or any module it pulls in) fails to
+       load, the module graph aborts and the loading splash would otherwise
+       stay up forever — a blank near-black screen with no UI. This tiny
+       inline guard runs independently of the module system and, if the app
+       has not signalled `window.__studioBooted` within a short window,
+       lifts the splash, reveals the login view, and shows a visible error
+       so the user is never stranded.
+  ==================================================================== -->
+  <script>
+    (function () {
+      var WATCHDOG_MS = 8000;
+      window.__studioBooted = window.__studioBooted || false;
+      setTimeout(function () {
+        if (window.__studioBooted) return;
+        var app = document.getElementById("app");
+        if (!app) return;
+        // Only intervene if we're still stuck on the boot splash.
+        if (app.getAttribute("data-view") !== "loading") return;
+        app.setAttribute("data-view", "login");
+        var errEl = document.getElementById("login-error");
+        var errText = document.getElementById("login-error-text");
+        if (errText) {
+          errText.textContent =
+            "The app didn’t finish loading. Refresh the page — if it persists, restart the Studio server.";
+        }
+        if (errEl) errEl.setAttribute("data-show", "true");
+        try { console.error("[studio] Boot watchdog fired: app.js did not signal boot within " + WATCHDOG_MS + "ms."); } catch (e) {}
+      }, WATCHDOG_MS);
+    })();
+  </script>
+
+  <script type="module" src="/static/app.js?v=11"></script>
+</body>
+</html>

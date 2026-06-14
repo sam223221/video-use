@@ -49,11 +49,17 @@ import { byId, toast } from "./util.js";
    AGENT VISION (view_frames): NEW engine/frames.js (still-frame decode →
    downscaled rotation-correct JPEGs) joins the precache; bridge.js gains the
    view_frames executor + the 2 MiB result cap (lockstep with the relay).
+   "13" = MUSIC MULTI-SELECT + iOS multi-select hints (the music picker gains
+   `multiple` and imports a pick STRICTLY one at a time — a sequential
+   single-flight batch mirroring ingest.js; a multi pick imports without
+   auto-placing N overlapping beds; an on-screen iOS multi-select tip appears
+   on both the music and video pickers — no precache list change, cache-name
+   bump only).
    BUMP IN LOCKSTEP, four places: index.html's two ?v= references, this
    constant, sw.js's ASSET_VERSION (the SW cache name derives from it — the
    cache-first shell only re-fetches on a cache-name change), and setup.html's
    styles.css ?v=. The update banner keys off this. */
-const ASSET_VERSION = "12";
+const ASSET_VERSION = "13";
 
 const app = byId("app");
 

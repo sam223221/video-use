@@ -74,6 +74,17 @@
      device's offline shell for tracks most projects never touch. The changed
      bytes of bridge.js / export.js / player.js / editor.js / capability.js /
      store/meta.js / store/edl.js / styles.css / index ride the cache-name bump.
+
+   Version "12" = MUSIC UPLOAD CAP RAISE (music-ops.js UPLOAD_MAX_BYTES → 3 GiB,
+   UPLOAD_MAX_DURATION_S → 6 h, friendly "max 3 GB" label). NO precache list
+   change — music-ops.js changed bytes ride the cache-name bump.
+   Version "13" = MUSIC MULTI-SELECT + iOS multi-select hints: the music
+   <input> gains `multiple` and music-ui.js imports a pick STRICTLY one at a
+   time (a sequential single-flight batch mirroring ingest.js runBatch; a multi
+   pick imports without auto-placing N overlapping whole-video beds), and a
+   short iOS multi-select tip is shown on BOTH the music and video pickers. NO
+   precache list change — music-ui.js + ingest.js are already precached, so
+   their changed bytes (plus styles.css / index) ride the cache-name bump.
    Module URL discipline:
    app.js dynamic-imports editor.js WITH ?v=; everything below the entry modules is imported BARE
    (editor.js → bridge/chat/player/export/tabs/transcribe; editor.js
@@ -82,7 +93,7 @@
    the exact request URLs.
 ============================================================================= */
 
-const ASSET_VERSION = "12";
+const ASSET_VERSION = "13";
 const CACHE_PREFIX = "studio2-shell-";
 const CACHE_NAME = CACHE_PREFIX + "v" + ASSET_VERSION;
 const V = "?v=" + ASSET_VERSION;

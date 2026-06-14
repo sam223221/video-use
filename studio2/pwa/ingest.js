@@ -201,6 +201,13 @@ export function mountIngest(container, { project, caps, onClipAdded } = {}) {
   const addBtn = el("button", { class: "btn btn--primary btn--block", type: "button" }, [
     icon("i-plus"), "Add video",
   ]);
+  // iOS multi-select hint: the input is already `multiple`, but the picker
+  // hides it behind a gesture — the Photo Library lets you tap several and the
+  // Files app needs "Select" tapped first. textContent-only, 390px-friendly.
+  const multiHint = el("p", {
+    class: "ingest__hint",
+    text: "Add several at once: in your Photo Library tap multiple, or in Files tap “Select” first.",
+  });
 
   // progress zone — the batch-position prefix ("Adding 2 of 5 — ") + the file
   // name live in the label; the byte bar tracks the file currently copying.
@@ -228,7 +235,7 @@ export function mountIngest(container, { project, caps, onClipAdded } = {}) {
   const cardWrap = el("div", { hidden: true });
 
   const root = el("section", { class: "ingest", "aria-label": "Add a video" }, [
-    input, addBtn, progressWrap, cardWrap,
+    input, addBtn, multiHint, progressWrap, cardWrap,
   ]);
   container.append(root);
 
@@ -258,6 +265,7 @@ export function mountIngest(container, { project, caps, onClipAdded } = {}) {
 
   function showIdle() {
     addBtn.hidden = false;
+    multiHint.hidden = false;       // the hint rides with the Add-video button
     progressWrap.hidden = true;
     cardWrap.hidden = true;
     cardWrap.replaceChildren();
@@ -265,6 +273,7 @@ export function mountIngest(container, { project, caps, onClipAdded } = {}) {
 
   function showProgress(phase) {
     addBtn.hidden = true;
+    multiHint.hidden = true;
     cardWrap.hidden = true;
     cardWrap.replaceChildren();
     // phase is the verb ("Copying into Studio…", "Checking the video…",
@@ -287,6 +296,7 @@ export function mountIngest(container, { project, caps, onClipAdded } = {}) {
 
   function showCard({ title, body, error = false, actions }) {
     addBtn.hidden = true;
+    multiHint.hidden = true;
     progressWrap.hidden = true;
     const card = el("div", {
       class: "ingest-card" + (error ? " ingest-card--error" : ""),

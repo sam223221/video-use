@@ -1239,6 +1239,10 @@ body:has(#app[data-view="editor"]):not(:has(.editor[data-kb="open"])) .toasts {
 .music__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
 .music__title { margin: 0; font-size: 1rem; }
 .music__sub { margin: 0; color: var(--ink-faint); font-size: 0.85rem; }
+/* iOS multi-select tip under the upload control (textContent-only). This is the
+   only on-screen instruction for multi-select, so it must clear AA: --ink-dim
+   (#a2b0bd) on --surface (#10141a) measures 8.3:1; --ink-faint was 4.1:1. */
+.music__hint { margin: 0; color: var(--ink-dim); font-size: 0.78rem; line-height: 1.4; }
 .music__actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
 .music__upload, .music__browse { gap: var(--s2); }
 .music__upload .icon, .music__browse .icon { width: 1rem; height: 1rem; }
@@ -1263,6 +1267,41 @@ body:has(#app[data-view="editor"]):not(:has(.editor[data-kb="open"])) .toasts {
 .music__lib-name { font-weight: 600; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .music__lib-meta { font-size: 0.7rem; color: var(--ink-faint); }
 .music__use { flex: 0 0 auto; }
+
+/* "Your sounds" — imported user tracks (uploads + placed library copies).
+   Reuses the library-row rhythm; rows carry a Place/Remove action (or a parked
+   "Placed" state when the track is on the timeline). */
+.music__yours { display: flex; flex-direction: column; gap: var(--s2); }
+.music__yours[hidden] { display: none; }
+.music__yours-title { margin: 0; font-size: 0.9rem; }
+.music__yours-sub { margin: 0; color: var(--ink-faint); font-size: 0.78rem; }
+.music__yours-list {
+  display: flex; flex-direction: column; gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--line-soft); border-radius: var(--r-md);
+  background: var(--surface-2);
+  max-height: 16rem; overflow-y: auto;
+}
+.music__yours-row {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2);
+  border-radius: var(--r-sm);
+}
+.music__yours-row + .music__yours-row { border-top: 1px solid var(--line-soft); }
+.music__yours-info { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.music__yours-name { font-weight: 600; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.music__yours-meta { font-size: 0.7rem; color: var(--ink-faint); }
+.music__yours-actions { display: flex; align-items: center; gap: var(--s1); flex: 0 0 auto; }
+.music__yours-state {
+  padding: 1px 8px; border-radius: var(--r-pill);
+  border: 1px solid var(--line); color: var(--ink-faint);
+  font-size: 0.66rem; letter-spacing: 0.03em; text-transform: uppercase;
+}
+.music__yours-place { flex: 0 0 auto; }
+.music__yours-remove { width: 2.2rem; height: 2.2rem; }
+.music__yours-remove:not(:disabled):hover { color: var(--bad); }
+.music__yours-remove:disabled { opacity: 0.4; cursor: default; }
+.music__yours-remove .icon { width: 1.05rem; height: 1.05rem; }
 
 .music__tier {
   display: flex; align-items: center; gap: var(--s2);
@@ -1689,6 +1728,10 @@ body:has(#app[data-view="editor"]):not(:has(.editor[data-kb="open"])) .toasts {
    from Step 4's pwa/DOCUMENT.md "CSS classes Step 5 must add" block) */
 .editor__ingest { flex: 0 0 auto; }
 .ingest { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4); background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--r-lg); }
+/* iOS multi-select tip under the "Add video" button (textContent-only). The
+   input is already `multiple`; the OS hides multi-pick behind a gesture. Same
+   AA fix as .music__hint: --ink-dim (#a2b0bd) on --surface is 8.3:1 (was 4.1:1). */
+.ingest__hint { margin: 0; color: var(--ink-dim); font-size: 0.78rem; line-height: 1.4; text-align: center; }
 .ingest-progress { display: flex; flex-direction: column; gap: var(--s2); }
 .ingest-progress__row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s3); font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-dim); }
 /* v9 multi-select: the label now carries a batch position ("Adding 2 of 5 —

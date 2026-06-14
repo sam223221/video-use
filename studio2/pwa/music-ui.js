@@ -6,14 +6,33 @@
    store/music.js) so the agent and UI never diverge (arch §3.3):
 
      1. UPLOAD YOUR OWN — a Files picker (a user gesture; the agent cannot read
-        the filesystem — arch §7.1). The picked audio file is probed
-        (engine/probe via the editor's adapter when present, else size-only),
-        imported into OPFS (music-ops.importUserTrack → store/music.importTrack),
-        and offered for placement.
+        the filesystem — arch §7.1). The input is `multiple`, so a pick can
+        carry several audio files; they import STRICTLY one at a time (a
+        sequential single-flight batch mirroring ingest.js runBatch — the gate
+        is held across the whole batch, one bad file is skipped and the rest
+        continue). Each picked audio file is probed (engine/probe via the
+        editor's adapter when present, else size-only) and imported into OPFS
+        (music-ops.importUserTrack → store/music.importTrack). PLACEMENT
+        DIFFERS BY COUNT (product decision): a SINGLE-file pick is also placed
+        under the whole video immediately (the common case); a MULTI pick
+        imports every track into the Music panel WITHOUT auto-placing — placing
+        all N under the whole video would stack N overlapping beds in the mix,
+        so the user places them deliberately afterward.
      2. BROWSE THE BUILT-IN LIBRARY — list_music_library (the bundled CC0
         catalog, same-origin static). Tapping "Use" places it under the whole
         video with sensible defaults (a library_id is resolved to its .m4a and
         copied into OPFS lazily by music-ops.addMusic).
+     2b. YOUR SOUNDS — the project's IMPORTED user tracks (store/music.listTracks),
+        the ones brought in by the upload picker (esp. a MULTI pick, which
+        imports WITHOUT auto-placing — see UPLOAD above). Without this list those
+        tracks are invisible and unplaceable. Each row shows the track's name +
+        duration; an unplaced track gets a "Place" action (the SAME placement
+        flow the single-upload path uses — import is already done, this just
+        appends the placement via music-ops.addMusic) and a "Remove" action
+        (store/music.deleteTrack). A track that is currently on the timeline is
+        shown as "On the timeline" and its Remove is parked (delete the placement
+        below first) so a placement can never reference deleted bytes. The list
+        refreshes after a multi-import lands and after every place/remove.
      3. PLACEMENTS ON THE TIMELINE — each folded music placement with live
         controls: whole-video vs a start/length range, volume (gain), fade
         in/out, and a "lower under speech" (duck) toggle. Each edit calls
@@ -32,7 +51,7 @@
 ============================================================================= */
 
 import { el, icon, toast, fmtDuration } from "./util.js";
-import { listTracks } from "./store/music.js";
+import { listTracks, deleteTrack } from "./store/music.js";
 import { readState } from "./store/edl.js";
 import {
   listMusicLibrary, addMusic, updateMusic, removeMusic, importUserTrack,
@@ -74,7 +93,7 @@ export function mountMusicPanel(host, ctx) {
 
   /* ---- DOM ---- */
   const fileInput = el("input", {
-    type: "file", accept: "audio/*", class: "music__file",
+    type: "file", accept: "audio/*", multiple: true, class: "music__file",
     "aria-hidden": "true", tabindex: "-1",
   });
   const uploadBtn = el("button", {
@@ -82,12 +101,31 @@ export function mountMusicPanel(host, ctx) {
     onclick: () => { if (!busy) fileInput.click(); },
   }, [icon("i-plus"), el("span", { text: "Upload from Files" })]);
 
+  // iOS multi-select hint: the Files app hides multi-select behind a "Select"
+  // gesture, and the Photo Library lets you tap several — neither is obvious.
+  // textContent-only, 390px-friendly. (Mirrors the video picker's hint.)
+  const multiHint = el("p", {
+    class: "music__hint",
+    text: "Add several at once: in your Photo Library tap multiple, or in Files tap “Select” first.",
+  });
+
   const libraryBtn = el("button", {
     class: "btn btn--sm music__browse", type: "button",
     "aria-expanded": "false", onclick: () => toggleLibrary(),
   }, [icon("i-film"), el("span", { text: "Browse library" })]);
 
   const libraryList = el("div", { class: "music__library", hidden: true, role: "list" });
+
+  /* ---- "Your sounds": imported user tracks (uploads + any placed library
+     copies). Hidden until at least one imported track exists — an empty section
+     would just be noise next to the upload control. The list itself is a `role
+     list`; each row a `listitem` with a Place/Remove action. */
+  const tracksList = el("div", { class: "music__yours-list", role: "list" });
+  const tracksSection = el("section", { class: "music__yours", hidden: true, "aria-label": "Your imported sounds" }, [
+    el("h3", { class: "music__yours-title", text: "Your sounds" }),
+    el("p", { class: "music__yours-sub", text: "Imported tracks ready to place under your video." }),
+    tracksList,
+  ]);
 
   const placementsList = el("div", { class: "music__placements" });
 
@@ -107,7 +145,9 @@ export function mountMusicPanel(host, ctx) {
     ]),
     el("p", { class: "music__sub", text: "Add a music bed under your video — upload your own, or use a built-in track." }),
     el("div", { class: "music__actions" }, [uploadBtn, libraryBtn, fileInput]),
+    multiHint,
     libraryList,
+    tracksSection,
     tierNote,
     placementsList,
     credit,
@@ -161,11 +201,16 @@ export function mountMusicPanel(host, ctx) {
   }
 
   /* ---- writes ---- */
+  // The "Your sounds" rows re-render only on refresh(), so their per-row Place/
+  // Remove buttons must be disabled directly while an op is in flight (mirrors
+  // uploadBtn/libraryBtn). Tracked here, refreshed whenever the list rebuilds.
+  let trackActionBtns = [];
   function setBusy(v) {
     busy = v;
     root.dataset.busy = String(v);
     uploadBtn.disabled = v;
     libraryBtn.disabled = v;
+    for (const b of trackActionBtns) b.disabled = v;
   }
 
   async function addLibrary(t) {
@@ -194,15 +239,214 @@ export function mountMusicPanel(host, ctx) {
     }
   }
 
-  async function onFilePicked() {
-    const file = fileInput.files && fileInput.files[0];
-    fileInput.value = "";                 // allow re-picking the same file
-    if (!file || busy || destroyed) return;
+  /* ---- "Your sounds": imported-track list (render + place + remove) ----------
+     listTracks returns every imported trkmeta (user uploads AND any library
+     track copied into OPFS when it was placed). We surface them all so a
+     multi-imported-but-unplaced upload is visible and placeable; a row carries
+     its placed-state so the user never double-places or deletes live bytes. */
+
+  /* The imported tracks currently sitting on the timeline (by track_id). A
+     library track only lands in `tracks` once placed, so its row always reads
+     placed — we still show it (honest) but park its Remove. */
+  function placedTrackIds() {
+    const ids = new Set();
+    for (const m of placements) if (m && m.track_id) ids.add(m.track_id);
+    return ids;
+  }
+
+  function trackName(t) {
+    return (t && (t.title || t.original_name)) || "Untitled sound";
+  }
+
+  function renderTracks() {
+    trackActionBtns = [];
+    if (!tracks.length) {
+      tracksSection.hidden = true;
+      tracksList.replaceChildren();
+      return;
+    }
+    const placed = placedTrackIds();
+    tracksSection.hidden = false;
+    tracksList.replaceChildren(...tracks.map((t) => trackRow(t, placed.has(t.track_id))));
+  }
+
+  function trackRow(t, isPlaced) {
+    const name = trackName(t);
+    const meta = [
+      t.source === "library" ? "Library" : null,
+      t.duration_s != null ? fmtDuration(t.duration_s) : null,
+      isPlaced ? "On the timeline" : null,
+    ].filter(Boolean).join(" · ");
+
+    const actions = [];
+    if (isPlaced) {
+      // Already placed — no second whole-video bed; the placement card below is
+      // where it's edited. Remove is parked (deleting live bytes would orphan
+      // the placement); we say why.
+      const removeBtn = el("button", {
+        class: "icon-btn music__yours-remove", type: "button", disabled: true,
+        "aria-label": "Remove " + name + " — it's on the timeline; remove its placement below first",
+        title: "On the timeline — remove its placement below first",
+      }, [icon("i-trash")]);
+      actions.push(
+        el("span", { class: "music__yours-state", text: "Placed", role: "status" }),
+        removeBtn,
+      );
+    } else {
+      const placeBtn = el("button", {
+        class: "btn btn--sm btn--primary music__yours-place", type: "button",
+        "aria-label": "Place " + name + " under the whole video",
+        onclick: () => placeTrack(t),
+      }, [el("span", { text: "Place" })]);
+      const removeBtn = el("button", {
+        class: "icon-btn music__yours-remove", type: "button",
+        "aria-label": "Remove " + name,
+        onclick: () => removeTrack(t),
+      }, [icon("i-trash")]);
+      trackActionBtns.push(placeBtn, removeBtn);
+      actions.push(placeBtn, removeBtn);
+    }
+
+    return el("div", { class: "music__yours-row", role: "listitem" }, [
+      el("div", { class: "music__yours-info" }, [
+        el("span", { class: "music__yours-name", text: name }),
+        meta ? el("span", { class: "music__yours-meta mono", text: meta }) : null,
+      ]),
+      el("div", { class: "music__yours-actions" }, actions),
+    ]);
+  }
+
+  /* Place an already-imported track under the whole video — the SAME placement
+     the single-upload convenience path uses (gain −8, fades 1 / 1.5), so a
+     track placed from this list behaves identically to one auto-placed on a
+     single-file pick. Import is already done; this only appends the placement. */
+  async function placeTrack(t) {
+    if (busy || destroyed) return;
+    const name = trackName(t);
     setBusy(true);
     try {
-      const probed = await probeAudio(file);
-      const doc = await importUserTrack(projectId, file, probed);
-      // Place it under the whole video immediately (the common case).
+      await addMusic(projectId, {
+        track_ref: { track_id: t.track_id },
+        duration_s: "whole",
+        gain_db: -8,
+        fade_in_s: 1,
+        fade_out_s: 1.5,
+      });
+      ctx.notifyEdlChange();
+      ctx.notifyRenderChange();
+      toast("Placed “" + name + "”.", "ok");
+      dlog("info", "music.place.track", { track_id: t.track_id });
+      await refresh();
+    } catch (err) {
+      dlog("warn", "music.place.track.err", { message: String(err && err.message).slice(0, 160) });
+      toast(plainErr(err, "Couldn't place that sound."), "bad");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* Delete an imported track (bytes + trkmeta) when it isn't placed. The render
+     re-derives placed-state, so a placed track never reaches here (its Remove is
+     disabled) — but we re-check defensively before deleting: if a placement
+     appeared between render and tap, we refuse and tell the user. */
+  async function removeTrack(t) {
+    if (busy || destroyed) return;
+    const name = trackName(t);
+    if (placedTrackIds().has(t.track_id)) {
+      toast("“" + name + "” is on the timeline — remove its placement first.", "info");
+      await refresh();
+      return;
+    }
+    setBusy(true);
+    try {
+      const existed = await deleteTrack(projectId, t.track_id);
+      if (existed) {
+        toast("Removed “" + name + "”.", "info");
+        dlog("info", "music.delete.track", { track_id: t.track_id });
+      }
+      await refresh();
+    } catch (err) {
+      dlog("warn", "music.delete.track.err", { message: String(err && err.message).slice(0, 160) });
+      toast(plainErr(err, "Couldn't remove that sound."), "bad");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ----- upload (one OR many — sequential single-flight batch) ----------------
+     The Files/Photo picker is `multiple`, so a pick can carry several audio
+     files. They run STRICTLY one at a time (mirror ingest.js runBatch): the
+     single-flight `setBusy(true)` gate is held across the WHOLE batch and
+     released once in the finally, so there is never a second import in flight.
+     Each file is probed → imported → (single-file only) placed; a per-iteration
+     try/catch means one bad/oversized file is SKIPPED with a message and the
+     rest CONTINUE (never abort the batch — mirrors ingest's degraded-mid-batch).
+
+     PRODUCT DECISION (plan §1): a MULTI pick IMPORTS every track into the
+     project (they appear in the Music panel ready to place) but does NOT
+     auto-place all N overlapping under the whole video — that would stack N beds
+     in the mix. A SINGLE-file pick keeps the import+place convenience. */
+  async function onFilePicked() {
+    // Snapshot the FileList NOW — picked handles are volatile and the awaited
+    // loop reads them seconds apart (bytes are still read lazily per file).
+    const files = fileInput.files ? Array.from(fileInput.files) : [];
+    fileInput.value = "";                 // allow re-picking the same file(s)
+    if (files.length === 0 || busy || destroyed) return;
+
+    const multi = files.length > 1;
+    setBusy(true);                        // held across the entire batch
+    dlog("info", "music.batch.start", { project_id: projectId, count: files.length });
+    let added = 0;
+    let lastTrackId = null;
+    try {
+      for (let i = 0; i < files.length; i++) {
+        if (destroyed) break;
+        const file = files[i];
+        try {
+          const doc = await importOne(file, { place: !multi });
+          lastTrackId = doc.track_id;
+          added += 1;
+          if (multi) {
+            // Per-file feedback during a batch so the user sees progress.
+            toast("Added " + added + " of " + files.length + " — " + trackLabel(doc, file), "ok");
+          }
+          // Keep the panel current as each track lands (cheap refold-free read).
+          await refresh();
+        } catch (err) {
+          dlog("warn", "music.upload.err", {
+            message: String(err && err.message).slice(0, 160), batch: multi,
+          });
+          toast(skipMsg(err, file, multi), "bad");
+          // CONTINUE — one bad file never aborts the rest of the batch.
+        }
+      }
+    } finally {
+      setBusy(false);                     // single release for the whole batch
+      dlog("info", "music.batch.done", {
+        project_id: projectId, count: files.length, added,
+      });
+    }
+
+    if (destroyed) return;
+    // A closing summary for a multi-pick (single-file already toasted on place).
+    if (multi && added > 0) {
+      const verb = added === files.length ? "Imported all " : "Imported ";
+      toast(verb + added + " of " + files.length + " — place them from the list below.", "info");
+    } else if (!multi && added === 1) {
+      toast("Added your music.", "ok");
+      dlog("info", "music.add.upload", { track_id: lastTrackId });
+    }
+  }
+
+  /* Probe → import one file; place it under the whole video ONLY when asked
+     (the single-file convenience path). Returns the persisted trkmeta doc.
+     Throws on a bad/oversized/non-audio file so the caller can skip+continue. */
+  async function importOne(file, { place }) {
+    const probed = await probeAudio(file);
+    const doc = await importUserTrack(projectId, file, probed);
+    if (place) {
       await addMusic(projectId, {
         track_ref: { track_id: doc.track_id },
         duration_s: "whole",
@@ -212,15 +456,25 @@ export function mountMusicPanel(host, ctx) {
       });
       ctx.notifyEdlChange();
       ctx.notifyRenderChange();
-      toast("Added your music.", "ok");
-      dlog("info", "music.add.upload", { track_id: doc.track_id });
-      await refresh();
-    } catch (err) {
-      dlog("warn", "music.upload.err", { message: String(err && err.message).slice(0, 160) });
-      toast(plainErr(err, "Couldn't use that file — it must be an audio file."), "bad");
-    } finally {
-      setBusy(false);
     }
+    return doc;
+  }
+
+  /* A short label for a track in batch feedback (title → original name → file
+     name). Truncated so a long name can't blow out a 390px toast. */
+  function trackLabel(doc, file) {
+    const raw = (doc && (doc.title || doc.original_name)) || (file && file.name) || "track";
+    const s = String(raw);
+    return s.length > 40 ? s.slice(0, 39) + "…" : s;
+  }
+
+  /* The per-file skip message — names the file in a batch so the user knows
+     WHICH one was dropped, and continues. */
+  function skipMsg(err, file, multi) {
+    const base = plainErr(err, "Couldn't use that file — it must be an audio file.");
+    if (!multi) return base;
+    const name = trackLabel({}, file);
+    return "Skipped “" + name + "”: " + base;
   }
 
   /* Probe the uploaded audio for duration/codec via the engine adapter's audio
@@ -466,11 +720,16 @@ export function mountMusicPanel(host, ctx) {
     }
     if (destroyed) return;
 
+    // "Your sounds" reflects every imported track + its placed-state (derived
+    // from the just-read placements) — rebuilt on every refresh so a freshly
+    // multi-imported track appears immediately and a place/remove updates it.
+    renderTracks();
+
     tierNote.hidden = placements.length === 0;
     if (placements.length === 0) {
       placementsList.replaceChildren(el("p", {
         class: "music__none",
-        text: "No music yet. Upload your own or pick a built-in track above.",
+        text: "No music on your timeline yet. Place a sound from “Your sounds” or the library above, or upload your own.",
       }));
       return;
     }

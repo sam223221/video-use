@@ -8,8 +8,10 @@
 #  path - see README.md.)
 #
 #  Steps mirror start.bat: ensure venv (Python 3.14) -> install deps once ->
-#  detect LAN IP -> print URLs/QR -> open browser -> uvicorn on 0.0.0.0:8420.
-#  Robust to spaces in the path.
+#  open browser -> `python -m app.serve` (HTTP on 0.0.0.0:8420 AND HTTPS on
+#  0.0.0.0:8443 — Secure Studio, app-generated certs). The server's startup
+#  banner is the single source of IP/URL/QR truth (the script-side LAN-IP/QR
+#  block was removed on purpose). Robust to spaces in the path.
 #
 #  Auth: the server prints a startup banner with the login username + password
 #  (from studio/config.toml [users]). Open the URL / scan the QR, then sign in
@@ -67,43 +69,20 @@ else
   echo "[setup] Dependencies already installed (skipping)."
 fi
 
-# --- 3. detect LAN IPv4 ----------------------------------------------------
-detect_lan_ip() {
-  if command -v ip >/dev/null 2>&1; then
-    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}'
-  elif command -v ipconfig >/dev/null 2>&1; then
-    # Git Bash on Windows
-    ipconfig 2>/dev/null | grep -i "IPv4" | grep -oE '([0-9]+\.){3}[0-9]+' | grep -vE '^127\.' | head -1
-  else
-    hostname -I 2>/dev/null | awk '{print $1}'
-  fi
-}
-LANIP="$(detect_lan_ip || true)"
-[ -z "$LANIP" ] && LANIP="127.0.0.1"
-
+# --- 3. open the default browser to the localhost URL ----------------------
+# (The LAN-IP/URL detection + terminal QR moved INTO the server: the startup
+#  banner printed below is the single source of IP truth. Secure Studio also
+#  prints the https URLs + the /setup hint there.)
 LOCAL_URL="http://127.0.0.1:$PORT/"
-LAN_URL="http://$LANIP:$PORT/"
-
-echo
-echo " ------------------------------------------------------------"
-echo "  Local : $LOCAL_URL"
-echo "  LAN   : $LAN_URL"
-echo "  Port  : $PORT   (bind 0.0.0.0 - reachable on your Wi-Fi)"
-echo " ------------------------------------------------------------"
-echo
-echo "  Scan this QR on your phone (same Wi-Fi) to open Studio, then sign in"
-echo "  with the username/password shown in the server startup banner below."
-echo
-"$VENV_PY" -c "import io,sys;sys.stdout=io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8');import qrcode;qr=qrcode.QRCode(border=2);qr.add_data('$LAN_URL');qr.make(fit=True);qr.print_ascii(out=sys.stdout,invert=True)"
-echo
-
-# --- 4. open the default browser to the localhost URL ----------------------
 ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$LOCAL_URL" >/dev/null 2>&1 ) || \
 ( command -v open     >/dev/null 2>&1 && open     "$LOCAL_URL" >/dev/null 2>&1 ) || \
 ( command -v start    >/dev/null 2>&1 && start    "$LOCAL_URL" >/dev/null 2>&1 ) || true
 
-# --- 5. run uvicorn on 0.0.0.0:8420 (no ANTHROPIC_API_KEY => MAX plan) ------
-echo " [run] Starting server on 0.0.0.0:$PORT  (Ctrl+C to stop)"
+# --- 4. run the dual-listener server (no ANTHROPIC_API_KEY => MAX plan) ----
+# app.serve runs HTTP on 0.0.0.0:$PORT AND HTTPS on 0.0.0.0:8443 (Secure
+# Studio; app-generated certs in .runtime/tls). STUDIO_TLS=0 or any TLS
+# failure falls back to HTTP-only, identical to the old uvicorn line.
+echo " [run] Starting server on 0.0.0.0:$PORT (+ https on 8443)  (Ctrl+C to stop)"
 echo
 cd "$STUDIO_DIR"
-exec "$VENV_PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
+exec "$VENV_PY" -m app.serve

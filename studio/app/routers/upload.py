@@ -48,20 +48,28 @@ sweep. Non-cancelled uploads are byte-identical to before.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from starlette.requests import ClientDisconnect
 
 from .. import security, settings
-from ..core import sessions, uploads
+from ..core import applog, sessions, uploads
 from . import deps
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
+
+# Structured upload diagnostics (rotating file log; see core/applog.py). Every
+# init / chunk / complete / cancel exit path writes ONE key=value line keyed by
+# upload_id so a stalled phone upload can be reconstructed end-to-end. Logging
+# is observation only — request handling is byte-identical to before.
+_log = logging.getLogger("studio.upload")
 
 _DEFAULT_CHUNK = 8 * 1024 * 1024  # 8 MiB
 
@@ -91,12 +99,24 @@ def init(body: InitBody, user: str = Depends(deps.require_session)) -> dict:
     try:
         filename = security.sanitize_filename(body.filename)
     except ValueError as exc:
+        _log.warning(
+            'init reject user=%s session_id=%s outcome=invalid_filename file="%s"',
+            user, session_id, applog.sanitize_log_value(body.filename, 120),
+        )
         raise deps.http_error(400, "invalid_filename", str(exc))
 
     # Size cap.
     if body.size_bytes < 0:
+        _log.warning(
+            'init reject user=%s session_id=%s outcome=invalid_size file="%s" size=%s',
+            user, session_id, applog.sanitize_log_value(filename, 120), body.size_bytes,
+        )
         raise deps.http_error(400, "invalid_size", "size_bytes must be >= 0")
     if body.size_bytes > settings.MAX_UPLOAD_BYTES:
+        _log.warning(
+            'init reject user=%s session_id=%s outcome=upload_too_large file="%s" size=%s',
+            user, session_id, applog.sanitize_log_value(filename, 120), body.size_bytes,
+        )
         raise deps.http_error(
             413, "upload_too_large",
             f"file exceeds the {settings.MAX_UPLOAD_BYTES} byte cap",
@@ -129,11 +149,19 @@ def init(body: InitBody, user: str = Depends(deps.require_session)) -> dict:
             # any received index whose part file vanished from disk first — the
             # client must never skip a chunk we cannot assemble.
             existing.prune_missing_parts()
+            received = existing.received_sorted()
+            _log.info(
+                'init user=%s session_id=%s upload_id=%s file="%s" size=%s '
+                "chunk_size=%s client_id=%s mode=resumed received_count=%s",
+                user, session_id, existing.upload_id,
+                applog.sanitize_log_value(filename, 120), body.size_bytes,
+                chunk_size, client_id, len(received),
+            )
             return {
                 "upload_id": existing.upload_id,
                 "chunk_size": existing.chunk_size,
                 "total_chunks": existing.total_chunks,
-                "received": existing.received_sorted(),
+                "received": received,
             }
     # NOTE: a server restart empties the registry, so a post-restart re-init
     # simply falls through here and creates a fresh upload — clean fallback,
@@ -143,6 +171,12 @@ def init(body: InitBody, user: str = Depends(deps.require_session)) -> dict:
     try:
         free = shutil.disk_usage(str(dest)).free
         if free < body.size_bytes:
+            _log.warning(
+                'init reject user=%s session_id=%s outcome=insufficient_storage '
+                'file="%s" size=%s free=%s',
+                user, session_id, applog.sanitize_log_value(filename, 120),
+                body.size_bytes, free,
+            )
             raise deps.http_error(
                 507, "insufficient_storage",
                 "not enough free disk space for this upload",
@@ -153,6 +187,13 @@ def init(body: InitBody, user: str = Depends(deps.require_session)) -> dict:
     sess = uploads.registry.create(
         session_id, dest, filename, body.size_bytes, chunk_size,
         owner=user, client_id=client_id,
+    )
+    _log.info(
+        'init user=%s session_id=%s upload_id=%s file="%s" size=%s '
+        "chunk_size=%s client_id=%s mode=fresh received_count=0",
+        user, session_id, sess.upload_id,
+        applog.sanitize_log_value(filename, 120), body.size_bytes,
+        chunk_size, client_id,
     )
     return {
         "upload_id": sess.upload_id,
@@ -216,10 +257,30 @@ async def put_chunk(
     index: int = Query(...),
     user: str = Depends(deps.require_session),
 ) -> dict:
-    sess = _owned_upload(user, upload_id)
+    # Diagnostics: ONE line per exit path (ok / idempotent / 499 disconnect /
+    # 404 tombstone / 413 / oserror) so a phone's stalled chunk N is visible in
+    # the file log with its duration. Pure observation — control flow is
+    # untouched. upload_id is raw client input on the 404 path -> sanitized.
+    t0 = time.perf_counter()
+    safe_uid = applog.sanitize_log_value(upload_id, 80)
+
+    def _exit(level: int, status_code: int, outcome: str, nbytes: object = "-") -> None:
+        _log.log(
+            level,
+            "chunk upload_id=%s index=%s bytes=%s duration_ms=%s status=%s outcome=%s user=%s",
+            safe_uid, index, nbytes,
+            int((time.perf_counter() - t0) * 1000), status_code, outcome, user,
+        )
+
+    try:
+        sess = _owned_upload(user, upload_id)
+    except HTTPException:
+        _exit(logging.INFO, 404, "upload_not_found")
+        raise
 
     # Validate the chunk index up front (before touching the body).
     if index < 0 or index >= sess.total_chunks:
+        _exit(logging.INFO, 400, "bad_index")
         raise deps.http_error(
             400, "bad_index",
             f"chunk index {index} out of range 0..{sess.total_chunks - 1}",
@@ -247,6 +308,7 @@ async def put_chunk(
             # If an explicit cancel ALSO raced this drain, the tombstone sweep
             # must still run — the 499 path must never strand the part dir.
             _sweep_cancelled(sess)
+            _exit(logging.INFO, 499, "client_disconnected_drain")
             raise deps.http_error(
                 499, "client_disconnected",
                 "client disconnected before the chunk was fully received",
@@ -257,11 +319,14 @@ async def put_chunk(
         # 404 upload_not_found, NOT a 200 (and NOT the stat below, whose part
         # file may be gone). Non-cancelled drains are unchanged.
         if _sweep_cancelled(sess):
+            _exit(logging.INFO, 404, "upload_not_found_cancelled")
             raise deps.http_error(404, "upload_not_found", "upload session not found")
+        nbytes = part_path.stat().st_size
+        _exit(logging.INFO, 200, "ok_idempotent", nbytes)
         return {
             "index": index,
             "received": sess.received_sorted(),
-            "bytes_received": part_path.stat().st_size,
+            "bytes_received": nbytes,
         }
 
     # Stream the body to disk in bounded reads, aborting the moment the running
@@ -292,7 +357,9 @@ async def put_chunk(
     except uploads.UploadTooLarge as exc:
         tmp.unlink(missing_ok=True)
         if _sweep_cancelled(sess):
+            _exit(logging.INFO, 404, "upload_not_found_cancelled", written)
             raise deps.http_error(404, "upload_not_found", "upload session not found")
+        _exit(logging.WARNING, 413, "upload_too_large", written)
         raise deps.http_error(413, "upload_too_large", str(exc))
     except ClientDisconnect:
         # Client (e.g. a phone on weak Wi-Fi) dropped the connection mid-chunk.
@@ -307,6 +374,7 @@ async def put_chunk(
         # handler's tmp handle was still open) is reclaimed now, not at boot.
         tmp.unlink(missing_ok=True)
         _sweep_cancelled(sess)
+        _exit(logging.INFO, 499, "client_disconnected", written)
         raise deps.http_error(
             499, "client_disconnected",
             "client disconnected before the chunk was fully received",
@@ -314,7 +382,9 @@ async def put_chunk(
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         if _sweep_cancelled(sess):
+            _exit(logging.INFO, 404, "upload_not_found_cancelled", written)
             raise deps.http_error(404, "upload_not_found", "upload session not found")
+        _exit(logging.ERROR, 500, "oserror", written)
         raise deps.http_error(500, "write_failed", f"could not write chunk: {exc}")
 
     # Cancel-race guard ("last writer sweeps"): the user may cancel while this
@@ -327,6 +397,7 @@ async def put_chunk(
     # returned 200 and the persisted part leaked ~8 MB per real cancel until
     # the >48 h boot GC).
     if _sweep_cancelled(sess, tmp):
+        _exit(logging.INFO, 404, "upload_not_found_cancelled", written)
         raise deps.http_error(404, "upload_not_found", "upload session not found")
 
     try:
@@ -338,7 +409,9 @@ async def put_chunk(
         # out from under the replace. That is a cancel, not a server fault —
         # sweep + 404, never a 500.
         if _sweep_cancelled(sess):
+            _exit(logging.INFO, 404, "upload_not_found_cancelled", written)
             raise deps.http_error(404, "upload_not_found", "upload session not found")
+        _exit(logging.ERROR, 500, "oserror", written)
         raise deps.http_error(500, "write_failed", f"could not write chunk: {exc}")
 
     sess.note_part_written(index, written)
@@ -348,8 +421,10 @@ async def put_chunk(
     # commit the committed part could survive — sweep it and report the upload
     # gone. For live uploads this is a no-op and the response is unchanged.
     if _sweep_cancelled(sess):
+        _exit(logging.INFO, 404, "upload_not_found_cancelled", written)
         raise deps.http_error(404, "upload_not_found", "upload session not found")
 
+    _exit(logging.INFO, 200, "ok", written)
     return {
         "index": index,
         "received": sess.received_sorted(),
@@ -370,12 +445,25 @@ def status(upload_id: str, user: str = Depends(deps.require_session)) -> dict:
 
 @router.post("/{upload_id}/complete")
 def complete(upload_id: str, user: str = Depends(deps.require_session)) -> dict:
-    sess = _owned_upload(user, upload_id)
+    t0 = time.perf_counter()
+    safe_uid = applog.sanitize_log_value(upload_id, 80)
+    try:
+        sess = _owned_upload(user, upload_id)
+    except HTTPException:
+        _log.info(
+            "complete upload_id=%s outcome=upload_not_found user=%s", safe_uid, user
+        )
+        raise
 
     if not sess.complete:
+        missing = sess.missing()
+        _log.warning(
+            "complete upload_id=%s session_id=%s outcome=incomplete missing_count=%s user=%s",
+            safe_uid, sess.session_id, len(missing), user,
+        )
         raise deps.http_error(
             409, "incomplete", "missing chunks",
-            detail={"missing": sess.missing()},
+            detail={"missing": missing},
         )
 
     try:
@@ -383,11 +471,22 @@ def complete(upload_id: str, user: str = Depends(deps.require_session)) -> dict:
     except ValueError as exc:
         # Permanent: missing chunk or size mismatch — discard parts + session.
         uploads.registry.remove(upload_id)
+        _log.warning(
+            "complete upload_id=%s session_id=%s outcome=incomplete_discarded "
+            "duration_ms=%s user=%s",
+            safe_uid, sess.session_id, int((time.perf_counter() - t0) * 1000), user,
+        )
         raise deps.http_error(409, "incomplete", str(exc))
     except OSError as exc:
         # Possibly transient (AV/indexer lock on the dest, network-drive hiccup).
         # Leave the parts + session intact so /complete can be retried without
         # forcing the client to re-upload the whole (up to 8 GiB) file (BUG-18).
+        _log.error(
+            "complete upload_id=%s session_id=%s outcome=assemble_failed "
+            "duration_ms=%s user=%s reason=%s",
+            safe_uid, sess.session_id, int((time.perf_counter() - t0) * 1000), user,
+            applog.sanitize_log_value(str(exc), 200),
+        )
         raise deps.http_error(500, "assemble_failed", f"could not assemble file: {exc}")
 
     # Success: assemble() already removed the part dir — just free the registry
@@ -402,6 +501,12 @@ def complete(upload_id: str, user: str = Depends(deps.require_session)) -> dict:
     except OSError:
         size = sess.size_bytes
 
+    _log.info(
+        'complete upload_id=%s session_id=%s stored_name="%s" total_bytes=%s '
+        "duration_ms=%s outcome=ok user=%s",
+        safe_uid, sess.session_id, applog.sanitize_log_value(out_path.name, 120),
+        size, int((time.perf_counter() - t0) * 1000), user,
+    )
     return {"ok": True, "path": str(out_path), "size_bytes": size}
 
 
@@ -425,4 +530,20 @@ def abort(upload_id: str, user: str = Depends(deps.require_session)) -> dict:
     sess = uploads.registry.get(upload_id)
     if sess is not None and sessions.resolve_dir(user, sess.session_id) is not None:
         uploads.registry.remove(upload_id)
+        # swept=yes when the part dir is gone NOW; swept=no means a racing
+        # writer still holds a handle (its tombstone sweep — or the boot GC —
+        # finishes the job). Read-only observation, never fails the DELETE.
+        try:
+            swept = "no" if sess.part_dir.exists() else "yes"
+        except OSError:
+            swept = "unknown"
+        _log.info(
+            "cancel upload_id=%s session_id=%s swept=%s user=%s",
+            applog.sanitize_log_value(upload_id, 80), sess.session_id, swept, user,
+        )
+    else:
+        _log.info(
+            "cancel upload_id=%s outcome=noop user=%s",
+            applog.sanitize_log_value(upload_id, 80), user,
+        )
     return {"ok": True}

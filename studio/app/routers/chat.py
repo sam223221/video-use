@@ -33,6 +33,8 @@ conversation. Touches ``last_touched_at`` at the start of each turn.
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
@@ -45,6 +47,11 @@ from ..core.events import sse, sse_comment
 from . import deps
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+# Agent-turn diagnostics (rotating file log; see core/applog.py). One line at
+# turn start and one at turn end (with duration + how it ended). The message
+# CONTENT is never logged — only its length. Observation only.
+_log = logging.getLogger("studio.agent")
 
 
 def _find_tool_call(tool_calls: list[dict], tool_call_id: str | None) -> dict | None:
@@ -87,6 +94,14 @@ async def _run_stream(session_id: str, folder: Path, message: str):
     assistant_text_parts: list[str] = []
     tool_calls: list[dict] = []
 
+    # Turn-end diagnostics: "ok" once a turn_end event was streamed, "error"
+    # when the stream raised, and "incomplete" when the generator was torn
+    # down before either (the browser/tab dropped mid-turn — exactly the
+    # silent-phone signature this logging exists to catch). The log call
+    # lives in `finally` (NEVER a yield there — the BUG-15 hazard).
+    t0 = time.perf_counter()
+    turn_outcome = "incomplete"
+
     try:
         async for event_type, data in session.send(message):
             yield sse(event_type, data)
@@ -114,6 +129,7 @@ async def _run_stream(session_id: str, folder: Path, message: str):
                     tc["ok"] = data.get("ok", True)
                     tc["summary"] = data.get("summary", "")
             elif event_type == "turn_end":
+                turn_outcome = "ok"
                 # Prefer the consolidated text the relay reports, if any.
                 final_text = data.get("text") or "".join(assistant_text_parts)
                 persist.append_message(folder, {
@@ -122,8 +138,15 @@ async def _run_stream(session_id: str, folder: Path, message: str):
                     "tool_calls": tool_calls,
                 })
     except Exception as exc:  # noqa: BLE001 - never crash the stream
+        turn_outcome = "error"
         yield sse("error", {"code": "stream_error", "message": str(exc)})
         yield sse("turn_end", {"stop_reason": "error"})
+    finally:
+        _log.info(
+            "turn end session_id=%s outcome=%s duration_ms=%s tool_calls=%s",
+            session_id, turn_outcome,
+            int((time.perf_counter() - t0) * 1000), len(tool_calls),
+        )
 
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
@@ -134,6 +157,10 @@ async def chat(body: ChatBody, user: str = Depends(deps.require_session)) -> Str
     _user, session_id, folder = deps.require_session_dir(user, body.session_id)
     # A chat turn is activity on the session — reset its stale clock.
     sessions.touch(user, session_id)
+    _log.info(
+        "turn start session_id=%s user=%s msg_chars=%s",
+        session_id, user, len(body.message),
+    )
     return StreamingResponse(
         _run_stream(session_id, folder, body.message),
         media_type="text/event-stream",

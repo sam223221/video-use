@@ -22,20 +22,44 @@
        ?v= whenever styles.css/app.js change to guarantee browsers fetch the new
        asset instead of a stale cached copy (a stale styles.css once shipped a
        blank-screen view-switcher bug). -->
-  <link rel="stylesheet" href="/static/styles.css?v=11" />
+  <link rel="stylesheet" href="/static/styles.css?v=16" />
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to main content</a>
 
-  <!-- stale-frontend banner: shown by app.js ONLY when /api/me reports a
-       NEWER asset_version than this page is running (never on null/equal/older).
-       Dismissible per-version; Refresh = location.reload(). -->
-  <div class="update-banner" id="update-banner" hidden role="status">
-    <span class="update-banner__text">Studio was updated — refresh to get the latest.</span>
-    <button class="btn btn--primary btn--sm" id="update-refresh" type="button">Refresh</button>
-    <button class="icon-btn update-banner__close" id="update-dismiss" type="button" aria-label="Dismiss update notice">
-      <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
-    </button>
+  <!-- fixed top-center banner stack: the update + secure banners share one
+       flex column so both can show at once without overlapping (app.js drives
+       visibility; the stack ignores pointer events while empty). -->
+  <div class="banner-stack">
+
+    <!-- stale-frontend banner: shown by app.js ONLY when /api/me reports a
+         NEWER asset_version than this page is running (never on null/equal/older).
+         Dismissible per-version; Refresh = location.reload(). -->
+    <div class="update-banner" id="update-banner" hidden role="status">
+      <span class="update-banner__text">Studio was updated — refresh to get the latest.</span>
+      <button class="btn btn--primary btn--sm" id="update-refresh" type="button">Refresh</button>
+      <button class="icon-btn update-banner__close" id="update-dismiss" type="button" aria-label="Dismiss update notice">
+        <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+      </button>
+    </div>
+
+    <!-- secure-address onboarding banner: shown by app.js ONLY on an insecure
+         origin (!window.isSecureContext) while /api/me reports a secure_url —
+         never on the https origin, never when TLS is off. Dismiss persists in
+         localStorage ("studio.secureBanner.dismissedAt") and gently RE-SHOWS
+         after 7 days. "Set up" opens /setup in a new tab so any in-flight
+         upload in this tab survives. -->
+    <div class="secure-banner" id="secure-banner" hidden role="status">
+      <span class="secure-banner__text">Uploads currently need the screen kept on.
+        Set up the secure address for hands-off uploads — a one-time, 2-minute setup.</span>
+      <a class="btn btn--primary btn--sm" id="secure-setup-link" href="/setup"
+         target="_blank" rel="noopener"
+         aria-label="Set up the secure address (opens in a new tab)">Set up</a>
+      <button class="icon-btn secure-banner__close" id="secure-dismiss" type="button" aria-label="Dismiss secure-address notice">
+        <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+      </button>
+    </div>
+
   </div>
 
   <div id="app" data-view="loading">
@@ -432,6 +456,6 @@
     })();
   </script>
 
-  <script type="module" src="/static/app.js?v=11"></script>
+  <script type="module" src="/static/app.js?v=16"></script>
 </body>
 </html>

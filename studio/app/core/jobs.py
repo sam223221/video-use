@@ -14,6 +14,7 @@ Process-global (single-user, single-process) and thread-safe.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import threading
 import time
@@ -21,10 +22,21 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Literal
 
+from . import applog
+
 JobStatus = Literal["queued", "running", "done", "error", "cancelled"]
 JobKind = Literal["transcribe", "render"]
 
 _MAX_LOG_LINES = 200
+
+# Job lifecycle diagnostics (rotating file log; see core/applog.py). This is
+# the SINGLE chokepoint every transcribe AND render job passes through —
+# whether started by the REST router or by an agent chat tool — so start/end
+# (with outcome + duration) is logged here once, never per caller. The log
+# calls sit OUTSIDE the registry/job locks. Observation only. Named ``_jlog``
+# (not ``_log``) so it can never be confused with the ``Job._log`` deque field
+# that shadows the bare name inside ``Job`` methods.
+_jlog = logging.getLogger("studio.job")
 
 
 @dataclass
@@ -90,6 +102,10 @@ class Job:
             self.result = result
             self.percent = 100.0
             self.updated_at = time.time()
+        _jlog.info(
+            "end job_id=%s kind=%s outcome=ok duration_ms=%s",
+            self.job_id, self.kind, int((time.time() - self.created_at) * 1000),
+        )
 
     def finish_error(self, code: str, message: str) -> None:
         with self._lock:
@@ -97,11 +113,23 @@ class Job:
             self.error_code = code
             self.error_message = message
             self.updated_at = time.time()
+        # ``message`` can carry multi-line subprocess stderr — sanitized so it
+        # stays one log line.
+        _jlog.warning(
+            "end job_id=%s kind=%s outcome=error code=%s duration_ms=%s message=%s",
+            self.job_id, self.kind, code,
+            int((time.time() - self.created_at) * 1000),
+            applog.sanitize_log_value(message, 300),
+        )
 
     def mark_cancelled(self) -> None:
         with self._lock:
             self.status = "cancelled"
             self.updated_at = time.time()
+        _jlog.info(
+            "end job_id=%s kind=%s outcome=cancelled duration_ms=%s",
+            self.job_id, self.kind, int((time.time() - self.created_at) * 1000),
+        )
 
     # -- cancellation ------------------------------------------------------
     def request_cancel(self) -> None:
@@ -173,7 +201,8 @@ class JobRegistry:
             job = Job(job_id=job_id, kind=kind, status="running")
             self._jobs[job_id] = job
             self._active[kind] = job_id
-            return job, None
+        _jlog.info("start kind=%s job_id=%s", kind, job_id)
+        return job, None
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:

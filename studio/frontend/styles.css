@@ -1341,34 +1341,53 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offs
 /* anchors rendered as buttons (download links) — kill the underline/blue */
 a.btn { text-decoration: none; }
 
-/* ----- stale-frontend update banner (slim, fixed, dismissible) -------------- */
-.update-banner {
+/* ----- top notice banners: stale-frontend update + secure-address ------------
+   Both banners live inside the fixed .banner-stack (index.html), a top-centered
+   flex COLUMN, so when both happen to show at once each takes its own row
+   instead of overlapping (heights are content-driven — text wraps at 390px).
+   The fixed positioning that used to live on .update-banner moved here; a lone
+   banner renders pixel-identically to before. The stack itself ignores pointer
+   events so the (usually empty) fixed region never blocks the topbar under it. */
+.banner-stack {
   position: fixed; top: var(--s3); left: 50%; transform: translateX(-50%);
   z-index: 160;
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; flex-direction: column; gap: var(--s2);
   width: min(94vw, 30rem);
+  pointer-events: none;
+}
+.banner-stack > * { pointer-events: auto; }
+
+.update-banner,
+.secure-banner {
+  display: flex; align-items: center; gap: var(--s3);
   background: var(--surface-3); border: 1px solid var(--accent-line);
   border-radius: var(--r-md); padding: var(--s2) var(--s2) var(--s2) var(--s4);
   font-size: 0.88rem; box-shadow: var(--shadow-2);
   animation: toast-in var(--dur) var(--ease-out);
 }
-@media (prefers-reduced-motion: reduce) { .update-banner { animation: none; } }
-.update-banner__text { flex: 1 1 auto; min-width: 0; }
-.update-banner__close { width: 2.2rem; height: 2.2rem; }
+@media (prefers-reduced-motion: reduce) {
+  .update-banner, .secure-banner { animation: none; }
+}
+.update-banner__text, .secure-banner__text { flex: 1 1 auto; min-width: 0; }
+.update-banner__close, .secure-banner__close { width: 2.2rem; height: 2.2rem; }
 
-/* >=44px effective tap targets WITHOUT fattening the slim chrome: the banner
-   overlays the topbar, so its controls keep their compact visible boxes
-   (btn--sm Refresh 2.1rem, close 2.2rem) and instead gain an invisible,
-   centered pseudo-element hit area extended to >=2.75rem (44px) on both axes.
+/* >=44px effective tap targets WITHOUT fattening the slim chrome: the banners
+   overlay the topbar, so their controls keep their compact visible boxes
+   (btn--sm 2.1rem, close 2.2rem) and instead gain an invisible, centered
+   pseudo-element hit area extended to >=2.75rem (44px) on both axes.
    Deliberately scoped to the banner controls + the nextstep dismiss — NOT a
    global .btn--sm / .icon-btn change (other usages keep compact metrics).
    The overhang (<=5.2px per side) stays inside the banner/card padding and
    the --s3 gap, so adjacent targets never overlap. */
 .update-banner .btn,
 .update-banner .icon-btn,
+.secure-banner .btn,
+.secure-banner .icon-btn,
 .nextstep__close { position: relative; }
 .update-banner .btn::after,
 .update-banner .icon-btn::after,
+.secure-banner .btn::after,
+.secure-banner .icon-btn::after,
 .nextstep__close::after {
   content: "";
   position: absolute; left: 50%; top: 50%;
@@ -1554,4 +1573,148 @@ a.btn { text-decoration: none; }
   font-size: 0.78rem; color: var(--warn);
 }
 .upload-hint .icon { width: 1rem; height: 1rem; flex: none; }
+/* inline "set up the secure address" link in the keep-screen-on notice (44px
+   inline-target exception applies: a link inside a sentence keeps text metrics) */
+.upload-hint__link { color: var(--accent-bright); font-weight: 600; }
 .uprow__resume { align-self: flex-start; min-height: 2.75rem; margin-top: var(--s1); }
+
+/* =============================================================================
+   SECURE SETUP PAGE (setup.html — standalone, login-free, served at /setup)
+   -----------------------------------------------------------------------------
+   setup.html links THIS stylesheet for the shared tokens; everything below is
+   built strictly from existing tokens. The app shell sets body{overflow:hidden}
+   (it manages its own scroll regions) — the setup page is a plain document and
+   must scroll, hence the body.setup-page override. Phone-first: single column,
+   no horizontal scroll at 390px (long https URLs break-all), 44px tap targets
+   on every control.
+============================================================================= */
+body.setup-page { overflow-y: auto; height: auto; min-height: 100%; }
+
+.setup {
+  max-width: 40rem; margin: 0 auto;
+  padding: var(--s5) var(--s4) var(--s7);
+  display: flex; flex-direction: column; gap: var(--s5);
+}
+
+.setup__brand { display: flex; align-items: center; gap: var(--s2); }
+.setup__head { display: flex; flex-direction: column; gap: var(--s3); }
+.setup__title { font-size: clamp(1.6rem, 6vw, 2.1rem); letter-spacing: -0.03em; line-height: 1.15; }
+.setup__lede { margin: 0; color: var(--ink-dim); font-size: 1rem; max-width: 36rem; }
+.setup__small { margin: 0; color: var(--ink-faint); font-size: 0.84rem; }
+
+/* tip / state callouts */
+.setup-callout {
+  display: flex; gap: var(--s3); align-items: flex-start;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-2); padding: var(--s3) var(--s4);
+  font-size: 0.9rem;
+}
+.setup-callout > .icon { color: var(--accent); flex: none; margin-top: 0.2rem; }
+.setup-callout p { margin: 0; color: var(--ink-dim); }
+.setup-callout p b { color: var(--ink); }
+.setup-callout--warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: linear-gradient(180deg, var(--warn-glow), var(--surface-2));
+}
+.setup-callout--warn > .icon { color: var(--warn); }
+
+/* the numbered steps — cards; explicit "Step N" eyebrows carry the numbering
+   (role="list" on the <ol> preserves list semantics under list-style:none) */
+.setup-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s4); }
+.setup-step {
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--surface); padding: var(--s4);
+  display: flex; flex-direction: column; gap: var(--s3);
+}
+.setup-step__eyebrow {
+  margin: 0; font-family: var(--font-mono); font-size: 0.7rem;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent-bright);
+}
+.setup-step h2 { font-size: 1.15rem; letter-spacing: -0.02em; }
+.setup-step p { margin: 0; color: var(--ink-dim); font-size: 0.92rem; }
+.setup-step p b { color: var(--ink); font-weight: 600; }
+
+/* step 3 — the commonly-missed trust toggle: deliberately the loudest card */
+.setup-step--critical {
+  border: 2px solid var(--accent);
+  background: linear-gradient(180deg, var(--accent-glow), var(--surface) 65%);
+  padding: var(--s5) var(--s4);
+  box-shadow: var(--shadow-2);
+}
+.setup-step--critical h2 { font-size: 1.3rem; display: flex; align-items: center; gap: var(--s2); }
+.setup-step--critical h2 > .icon { color: var(--warn); flex: none; }
+.setup-step__warn { color: var(--warn); font-weight: 600; font-size: 0.95rem; }
+.setup-step--critical .setup-step__warn,
+.setup-step--critical p { font-size: 0.95rem; }
+
+/* big download CTA (step 1) — same recipe as .btn--primary, sized for thumbs */
+.setup-dl {
+  display: flex; align-items: center; justify-content: center; gap: var(--s2);
+  min-height: 3.25rem; width: 100%;
+  background: var(--accent); color: var(--accent-ink);
+  border-radius: var(--r-md);
+  font-family: var(--font-display); font-weight: 600; font-size: 1.05rem;
+  letter-spacing: -0.01em; text-decoration: none;
+  box-shadow: 0 6px 22px -10px var(--accent), inset 0 1px 0 rgba(255,255,255,0.18);
+  transition: background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.setup-dl:hover { background: var(--accent-bright); }
+.setup-dl:active { transform: translateY(1px); }
+/* disabled look while TLS is explicitly off (the script also removes href) */
+.setup-dl[aria-disabled="true"] { opacity: 0.45; box-shadow: none; cursor: not-allowed; }
+
+/* Settings-path chips (Settings → General → …) */
+.setup-path { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); margin: 0; }
+.setup-chip {
+  display: inline-flex; align-items: center;
+  background: var(--surface-3); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 0.15rem 0.5rem;
+  font-family: var(--font-display); font-weight: 500; font-size: 0.84rem; color: var(--ink);
+  white-space: nowrap;
+}
+.setup-chip--hot { border-color: var(--accent-line); background: var(--accent-glow); font-weight: 600; }
+.setup-path__sep { color: var(--ink-faint); user-select: none; }
+
+/* live secure-address links (step 4) — block targets, URLs wrap (no h-scroll) */
+.setup-url-row { display: flex; flex-direction: column; gap: var(--s1); }
+.setup-url {
+  display: flex; align-items: center;
+  min-height: 2.75rem; padding: var(--s2) var(--s3);
+  border: 1px solid var(--accent-line); border-radius: var(--r-md);
+  background: var(--surface-2);
+  font-family: var(--font-mono); font-size: 0.9rem; color: var(--accent-bright);
+  word-break: break-all; text-decoration: none;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.setup-url:hover { background: var(--surface-3); border-color: var(--accent); }
+.setup-url-note { color: var(--ink-faint); font-size: 0.82rem; margin: 0; }
+.setup-url-pending { color: var(--ink-faint); font-size: 0.88rem; margin: 0; }
+
+/* collapsed extras: Android / Windows / troubleshooting */
+.setup-more { border: 1px solid var(--line-soft); border-radius: var(--r-md); background: var(--surface); }
+.setup-more > summary {
+  display: flex; align-items: center; gap: var(--s2);
+  min-height: 2.75rem; padding: var(--s2) var(--s4);
+  cursor: pointer; list-style: none;
+  font-family: var(--font-display); font-weight: 600; font-size: 0.92rem;
+}
+.setup-more > summary::-webkit-details-marker { display: none; }
+.setup-more__chev { margin-left: auto; flex: none; color: var(--ink-faint); transition: transform var(--dur-fast) var(--ease); }
+.setup-more[open] > summary .setup-more__chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .setup-more__chev { transition: none; } }
+.setup-more__body { padding: 0 var(--s4) var(--s4); display: flex; flex-direction: column; gap: var(--s3); }
+.setup-more__body p { color: var(--ink-dim); font-size: 0.9rem; margin: 0; }
+.setup-more__body p b { color: var(--ink); }
+.setup-more__body ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: var(--s2); }
+.setup-more__body li { color: var(--ink-dim); font-size: 0.9rem; }
+.setup-more__body li b { color: var(--ink); }
+/* belt-and-braces: never let the author display:flex defeat the closed state */
+.setup-more:not([open]) > .setup-more__body { display: none; }
+
+.setup-foot { display: flex; }
+.setup-foot a {
+  display: inline-flex; align-items: center;
+  min-height: 2.75rem; padding: 0 var(--s2);
+  color: var(--ink-dim); text-decoration: none;
+}
+.setup-foot a:hover { color: var(--ink); text-decoration: underline; }

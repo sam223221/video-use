@@ -1,0 +1,21 @@
+# Studio v2 relay — pinned dependencies (arch §1.2; Python 3.14).
+#
+# Deliberately ABSENT vs v1 (the kill list — do not add back):
+#   python-multipart  — the relay never PARSES multipart. The M2 transcribe
+#                       upload is a RAW streamed body (no UploadFile/Form/File),
+#                       and the OUTBOUND ElevenLabs multipart is built by httpx,
+#                       not parsed — so the "no multipart parsing surface"
+#                       property (M1 §8.5) holds verbatim. Do NOT add it back.
+#   requests/numpy/matplotlib/librosa — there are no helpers; the relay runs
+#                                       no media tooling at all
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+claude-agent-sdk==0.2.87
+cryptography==48.0.0
+qrcode[pil]==8.2
+pillow==12.2.0
+# httpx — the relay's first and only OUTBOUND HTTP dependency (M2, arch §1.1):
+# async-native (one asyncio loop), streams the spooled audio out, and builds
+# the ElevenLabs multipart natively. Pinned to the current stable verified at
+# build (2026-06-14); already present transitively (via the Agent SDK's mcp).
+httpx==0.28.1

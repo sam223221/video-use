@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0b0a09" />
+  <meta name="description" content="video-use Studio — one-time secure-address setup for your phone or computer." />
+  <title>Secure Setup — video-use Studio</title>
+
+  <!-- Same inline SVG favicon as the app shell (zero extra requests). -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a00'/%3E%3Cpath d='M12 9.5l11 6.5-11 6.5z' fill='%231a0d00'/%3E%3C/svg%3E" />
+
+  <!-- =====================================================================
+       STANDALONE PAGE — served login-free at /setup on BOTH schemes.
+       No SPA boot, no module graph, no login dependency: a household member
+       lands here from the #secure-banner / keep-screen-on notice and follows
+       the steps on their phone. The shared stylesheet is linked below purely
+       for the design tokens; the tiny <style> block FIRST is a fallback so
+       the page stays readable even if styles.css fails to load (the link
+       comes after it, so the real stylesheet wins the cascade when present).
+  ====================================================================== -->
+  <style>
+    body { margin: 0; background: #0b0a09; color: #f4f0e8; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.55; }
+    .setup { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+    a { color: #ff7a2e; }
+    .icon { width: 1.25em; height: 1.25em; }
+    [hidden] { display: none !important; }
+  </style>
+  <link rel="stylesheet" href="/static/styles.css?v=16" />
+</head>
+<body class="setup-page">
+  <main class="setup">
+
+    <header class="setup__head">
+      <span class="setup__brand">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__name">video<b>use</b> Studio</span>
+      </span>
+      <h1 class="setup__title">Set up the secure address</h1>
+      <p class="setup__lede">
+        A one-time setup, about two minutes. After it, this phone can upload footage
+        with the screen allowed to lock — no more keeping it awake by hand.
+      </p>
+      <p class="setup__small">Do this once on each phone or computer that uses Studio.</p>
+    </header>
+
+    <!-- friendly trouble callout — revealed by the script below with one of two
+         copies: "secure mode is off" when /api/tls/info explicitly reports
+         enabled:false, or a softer "couldn't reach the server" when the fetch
+         itself fails (network blip / non-OK). The script fills both text nodes
+         via textContent before unhiding. -->
+    <div class="setup-callout setup-callout--warn" id="tls-state" role="status" hidden>
+      <svg class="icon" width="18" height="18" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+      <p><b id="tls-state-lead">Secure mode isn’t on right now.</b> <span id="tls-state-rest">Restart the Studio server on the computer, then reload this page.</span></p>
+    </div>
+
+    <!-- iPhone: profiles can only be installed from Safari -->
+    <div class="setup-callout">
+      <svg class="icon" width="18" height="18" aria-hidden="true"><use href="/static/assets/icons.svg#i-spark"></use></svg>
+      <p><b>iPhone tip — use Safari for these steps.</b> If scanning the QR code opened a
+         different browser, copy this page’s address and paste it into Safari first.
+         Other browsers on iPhone can’t finish step 1.</p>
+    </div>
+
+    <!-- ===================================================================
+         THE FOUR STEPS (iPhone-first; Android/Windows live in the collapsed
+         sections below). Explicit "Step N" labels in the headings so the
+         numbering survives even with the list markers styled away
+         (role="list" keeps the list semantics under list-style:none).
+    ==================================================================== -->
+    <ol class="setup-steps" role="list">
+
+      <li class="setup-step">
+        <p class="setup-step__eyebrow">Step 1</p>
+        <h2>Download the certificate</h2>
+        <p>This small file teaches your phone to trust your own Studio. iPhone will ask
+           to allow a configuration profile — tap <b>Allow</b>.</p>
+        <a class="setup-dl" id="ca-download" href="/ca.crt">
+          <svg class="icon" width="20" height="20" aria-hidden="true"><use href="/static/assets/icons.svg#i-download"></use></svg>
+          Download certificate
+        </a>
+        <p class="setup__small">Nothing leaves your home network — the certificate is made by your own Studio computer.</p>
+      </li>
+
+      <li class="setup-step">
+        <p class="setup-step__eyebrow">Step 2</p>
+        <h2>Install it</h2>
+        <p class="setup-path" aria-label="Settings path">
+          <span class="setup-chip">Settings</span>
+          <span class="setup-path__sep" aria-hidden="true">→</span>
+          <span class="setup-chip">Profile Downloaded</span>
+          <span class="setup-path__sep" aria-hidden="true">→</span>
+          <span class="setup-chip">Install</span>
+        </p>
+        <p>Open <b>Settings</b> — near the top you’ll see <b>Profile Downloaded</b>.
+           Tap it, tap <b>Install</b>, enter your passcode, then tap <b>Install</b> again.</p>
+      </li>
+
+      <!-- THE COMMONLY-MISSED STEP — deliberately the loudest card on the page -->
+      <li class="setup-step setup-step--critical">
+        <p class="setup-step__eyebrow">Step 3 — the one everyone misses</p>
+        <h2>
+          <svg class="icon" width="22" height="22" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+          Turn the trust switch on
+        </h2>
+        <p class="setup-path" aria-label="Settings path">
+          <span class="setup-chip">Settings</span>
+          <span class="setup-path__sep" aria-hidden="true">→</span>
+          <span class="setup-chip">General</span>
+          <span class="setup-path__sep" aria-hidden="true">→</span>
+          <span class="setup-chip">About</span>
+          <span class="setup-path__sep" aria-hidden="true">→</span>
+          <span class="setup-chip setup-chip--hot">Certificate Trust Settings</span>
+        </p>
+        <p>Scroll to the very bottom of the <b>About</b> page. Under
+           <b>Certificate Trust Settings</b>, turn the switch <b>ON</b> next to the name
+           that starts with <b>“video-use Studio CA”</b>, then tap <b>Continue</b>.</p>
+        <p class="setup-step__warn">Skipping this step means the secure address still shows a warning.</p>
+      </li>
+
+      <li class="setup-step">
+        <p class="setup-step__eyebrow">Step 4</p>
+        <h2>Open your secure address</h2>
+        <p>Tap a link below and sign in like you normally do — that’s the whole setup.</p>
+        <p class="setup-url-pending" id="url-pending">Looking up your secure addresses…</p>
+        <div class="setup-url-row" id="url-row-ip" hidden>
+          <a class="setup-url" id="url-ip" rel="noopener"></a>
+        </div>
+        <div class="setup-url-row" id="url-row-local" hidden>
+          <a class="setup-url" id="url-local" rel="noopener"></a>
+          <p class="setup-url-note">Bookmark this one (or add it to your Home Screen) — it keeps
+             working even if the computer’s address changes.</p>
+        </div>
+      </li>
+
+    </ol>
+
+    <!-- ===================================================================
+         OTHER DEVICES + HELP (collapsed so the phone flow stays short)
+    ==================================================================== -->
+    <details class="setup-more">
+      <summary>
+        Android phone (Chrome)
+        <svg class="icon setup-more__chev" width="16" height="16" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+      </summary>
+      <div class="setup-more__body">
+        <ol>
+          <li>Tap <b>Download certificate</b> in step 1 above — the file is called <b>ca.crt</b>.</li>
+          <li>Open <b>Settings</b> → <b>Security &amp; privacy</b> → <b>More security settings</b>
+              (on some phones: <b>Encryption &amp; credentials</b>) → <b>Install a certificate</b> →
+              <b>CA certificate</b>.</li>
+          <li>Tap <b>Install anyway</b>, then pick the downloaded <b>ca.crt</b>.</li>
+          <li>Come back here and open the secure address from step 4.</li>
+        </ol>
+        <p>Menu names vary a little between phones — if you can’t find these, search
+           Settings for “CA certificate”.</p>
+      </div>
+    </details>
+
+    <details class="setup-more">
+      <summary>
+        Windows computer
+        <svg class="icon setup-more__chev" width="16" height="16" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+      </summary>
+      <div class="setup-more__body">
+        <ol>
+          <li>Download the certificate in step 1 above, then double-click the <b>ca.crt</b> file.</li>
+          <li>Click <b>Install Certificate…</b> → <b>Current User</b> → <b>Next</b>.</li>
+          <li>Choose <b>Place all certificates in the following store</b> → <b>Browse</b> →
+              <b>Trusted Root Certification Authorities</b> → <b>OK</b> → <b>Next</b> → <b>Finish</b>.</li>
+          <li>Confirm the security prompt with <b>Yes</b>, then open the secure address
+              from step 4 in your browser.</li>
+        </ol>
+      </div>
+    </details>
+
+    <details class="setup-more">
+      <summary>
+        Something not working?
+        <svg class="icon setup-more__chev" width="16" height="16" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+      </summary>
+      <div class="setup-more__body">
+        <p><b>Still seeing a warning on the secure address?</b> You probably missed step 3 —
+           go to <b>Settings → General → About → Certificate Trust Settings</b> and turn the
+           switch on.</p>
+        <p><b>Can’t connect at all?</b> On the Studio computer, run <b>open-firewall.ps1</b>
+           once as administrator, then try again.</p>
+        <p><b>The old address says “not secure”?</b> That’s expected — the old http address
+           stays exactly as it was. Just use the new https one from step 4.</p>
+      </div>
+    </details>
+
+    <footer class="setup-foot">
+      <a href="/">‹ Back to Studio</a>
+    </footer>
+
+  </main>
+
+  <!-- =====================================================================
+       The page's ONLY script: fetch /api/tls/info (public, never 5xx by
+       contract) and fill the live secure addresses. ALL dynamic values are
+       rendered via textContent — never markup. href is only assigned after
+       an explicit https:// scheme check (defense in depth; the value comes
+       from our own server). An explicit enabled:false shows the "secure mode
+       is off" state (and de-arms the download); a fetch failure / non-OK
+       shows a softer "couldn't reach the server" state and leaves the
+       download armed — TLS may be fine and the phone just blipped.
+  ====================================================================== -->
+  <script>
+    (function () {
+      "use strict";
+
+      function byId(id) { return document.getElementById(id); }
+
+      /* Reveal the trouble callout. `definitelyOff` is true only when the
+         server explicitly said enabled:false — that gets the "secure mode is
+         off, restart the server" copy AND disables the download button,
+         because /ca.crt would 404. A mere fetch failure (network blip,
+         non-OK) gets softer "couldn't reach the server" copy and the button
+         stays live — secure mode may be perfectly fine. textContent only. */
+      function showOff(definitelyOff) {
+        var lead = byId("tls-state-lead");
+        var rest = byId("tls-state-rest");
+        if (lead) lead.textContent = definitelyOff
+          ? "Secure mode isn’t on right now."
+          : "Couldn’t reach the Studio server just now.";
+        if (rest) rest.textContent = definitelyOff
+          ? "Restart the Studio server on the computer, then reload this page."
+          : "Check you’re on the home Wi-Fi and reload this page.";
+        var state = byId("tls-state");
+        if (state) state.hidden = false;
+        var pending = byId("url-pending");
+        if (pending) pending.textContent = definitelyOff
+          ? "The secure addresses will show up here once secure mode is on."
+          : "The secure addresses will show up here after a reload.";
+        if (definitelyOff) {
+          var dl = byId("ca-download");
+          if (dl) {
+            dl.setAttribute("aria-disabled", "true");
+            dl.removeAttribute("href");
+          }
+        }
+      }
+
+      /* Fill one address row. Returns true when the link was actually shown. */
+      function fillLink(rowId, linkId, url) {
+        if (typeof url !== "string" || url.indexOf("https://") !== 0) return false;
+        var row = byId(rowId);
+        var a = byId(linkId);
+        if (!row || !a) return false;
+        a.href = url;          // scheme-checked above; value comes from our own server
+        a.textContent = url;   // textContent ONLY — never markup
+        row.hidden = false;
+        return true;
+      }
+
+      fetch("/api/tls/info", { credentials: "same-origin" })
+        .then(function (res) {
+          if (!res.ok) throw new Error("http " + res.status);
+          return res.json();
+        })
+        .then(function (info) {
+          if (!info || info.enabled !== true) { showOff(true); return; }
+          var any = false;
+          if (fillLink("url-row-ip", "url-ip", info.https_url)) any = true;
+          if (fillLink("url-row-local", "url-local", info.host_local_url)) any = true;
+          var pending = byId("url-pending");
+          if (any && pending) { pending.hidden = true; return; }
+          showOff(false);   // enabled but no usable URLs — not ready yet; soft copy, download stays armed
+        })
+        .catch(function () { showOff(false); });
+    })();
+  </script>
+</body>
+</html>

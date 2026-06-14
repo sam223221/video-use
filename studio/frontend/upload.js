@@ -16,6 +16,16 @@
      and 5xx. Other 4xx fail fast. The init POST gets the same retry (it is
      idempotent under the client_id contract below). `complete` is single-shot;
      a failed complete is recovered via the Resume affordance.
+     2026-06-10: UNKNOWN (non-ApiError) errors — e.g. a raw TypeError from a
+     torn network read — are TRANSIENT by default (retry + Resume); ONLY
+     AbortError stays permanent, preserving the user-cancel short-circuit.
+   • Per-chunk STALL WATCHDOG (2026-06-10, the live-incident fix): a hung PUT
+     whose response never arrives can't throw, so retries never fired. Each
+     attempt arms a timer (≥90s, scaled to chunk size — see chunkTimeoutMs);
+     on expiry the attempt's own AbortController aborts the fetch and the
+     failure is classified as a transient timeout (`up.chunk.timeout` diag
+     event) so the normal backoff retries it — the server-side chunk is
+     already committed, so the re-PUT is an instant idempotent 200.
    • STABLE client_id per file (derived from name+size+lastModified, charset
      [a-f0-9], 17 chars) sent on every init. If a live upload matches
      (user+session+client_id+filename+size+chunk_size) the server returns the
@@ -40,7 +50,15 @@
      same client_id and resumes the server-side partial state.
    • Screen WAKE LOCK while any upload is active (re-acquired on
      visibilitychange, released when the last upload settles). Feature-detected;
-     when unavailable a small "keep your screen on" hint shows instead.
+     whenever an active upload is NOT actually protected by a held lock
+     (API absent — e.g. iOS over plain HTTP, a non-secure context — or the
+     acquire was denied) a persistent inline notice shows above the progress
+     rows: "Keep the screen on and stay in this tab until the upload
+     finishes." It clears when uploads settle or a lock is acquired. The
+     notice carries an inline link to /setup (the one-time secure-address
+     flow, 2026-06-11) — on the https origin Wake Lock works and the notice
+     never shows. The link opens in a NEW tab so it can't kill the very
+     upload it appears next to.
 
    Critical: slice the File LAZILY per chunk (file.slice) — never read the whole
    file into memory (mobile Safari/Chrome will OOM on multi-GB clips).
@@ -63,6 +81,57 @@ const CONTENT_TYPES = {
    Each wait gets ±25% jitter so parallel uploads don't retry in lockstep. */
 const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 
+/* ---- per-chunk stall watchdog (2026-06-10 incident fix) ---------------------
+   The live failure: the server COMMITS a chunk and responds 200, but the
+   response never reaches the page's JS — the PUT just hangs forever. Retries
+   only fire on a THROWN error, so a silently hung fetch defeated the whole
+   retry machinery. Each chunk ATTEMPT therefore arms a timer; on expiry the
+   attempt's fetch is aborted and classified as a transient timeout, and the
+   existing backoff retries it. The numbers:
+     • floor 90s — generous headroom over any sane same-LAN/cellular round trip,
+       and the plan's stated floor; small (final) chunks land here.
+     • scale: chunk_bytes / 128 KiB/s (≈1 Mbit/s sustained uplink — about the
+       slowest link this 8 GiB-class video pipeline is usable on) + 30s grace
+       for server fsync/commit + response latency on a congested link.
+       An 8 MiB chunk ⇒ max(90s, 64s + 30s) = 94s, inside the plan's 90–120s.
+   Bias is deliberately toward firing EARLY: a premature abort is cheap (chunk
+   PUTs are idempotent — a re-PUT of a committed chunk is an instant 200), while
+   a late one means minutes of silent hang. Links slower than the budget will
+   occasionally re-send a chunk and still make forward progress; retries +
+   Resume cover the pathological cases. */
+const CHUNK_STALL_FLOOR_MS = 90_000;
+const CHUNK_STALL_BYTES_PER_SEC = 128 * 1024;
+const CHUNK_STALL_GRACE_MS = 30_000;
+
+function chunkTimeoutMs(bytes) {
+  const transferMs = Math.ceil((bytes / CHUNK_STALL_BYTES_PER_SEC) * 1000);
+  return Math.max(CHUNK_STALL_FLOOR_MS, transferMs + CHUNK_STALL_GRACE_MS);
+}
+
+/* ---- diagnostics shim -------------------------------------------------------
+   Forward lifecycle events to the diag logger (diag.js, loaded ONCE by app.js,
+   versioned, published on window.__studioDiag). Deliberately NOT an import:
+   a bare `import "./diag.js"` from this ?v-versioned module would create a
+   SECOND diag module instance (the documented api.js double-load trap). The
+   shim is a silent no-op when diag is absent — uploads NEVER depend on
+   logging, and logging can never break an upload. */
+function dlog(level, msg, data) {
+  try {
+    const d = window.__studioDiag;
+    if (d && typeof d.dlog === "function") d.dlog(level, msg, data);
+  } catch { /* diagnostics must never interfere */ }
+}
+
+/* Compact, cap-safe error descriptor for diag data (code/status for ApiError,
+   name + short message otherwise — never a full stack, never a URL). */
+function errMeta(err) {
+  if (err instanceof ApiError) return { code: err.code, status: err.status };
+  return {
+    code: (err && err.name) || "error",
+    message: String((err && err.message) || err || "").slice(0, 200),
+  };
+}
+
 /* ---- stable per-file client id ---------------------------------------------
    Deterministic from the file's identity (name + size + lastModified) so the
    SAME file always yields the SAME id — across retries, Resume taps, and even
@@ -83,9 +152,20 @@ function clientIdFor(file) {
 
 /* ---- transient-vs-permanent error classification --------------------------- */
 function isTransient(err) {
-  if (!(err instanceof ApiError)) return false;
+  if (!(err instanceof ApiError)) {
+    // 2026-06-10 incident fix: a NON-ApiError used to be classified PERMANENT,
+    // which made a raw TypeError (a fetch/body-read network death that slipped
+    // past api.js normalization) kill the upload with ZERO retries and no
+    // Resume — exactly the live failure shape. Unknown errors at this seam are
+    // overwhelmingly network-shaped, and retrying them is cheap (chunk PUTs are
+    // idempotent), so they are now TRANSIENT by default. The ONE exception is
+    // AbortError: that is the user-cancel short-circuit (the watchdog converts
+    // its own abort into ApiError(0,"timeout") before it gets here) and must
+    // keep failing fast so Cancel never burns a retry/backoff cycle.
+    return !(err && err.name === "AbortError");
+  }
   if (err.code === "file_unreadable") return false;     // client-side, not network
-  if (err.code === "network" || err.status === 0) return true;
+  if (err.code === "network" || err.status === 0) return true;   // status 0 includes the watchdog's "timeout"
   if (err.status === 499 || err.code === "client_disconnected") return true;
   if (err.status === 408 || err.status === 429) return true;
   if (err.status >= 500) return true;
@@ -93,9 +173,12 @@ function isTransient(err) {
 }
 
 /* A terminal failure that is still worth a Resume button: transient classes
-   (retries exhausted), the iCloud/file-unreadable case (user downloads the
-   file, then resumes), and 507 (server disk freed, then resume). Hard 4xx
-   (401 / 404 session_not_found / 413 …) get no Resume — retrying can't help. */
+   (retries exhausted — since the 2026-06-10 reclassification this includes
+   non-ApiError/raw-TypeError network deaths, so those rows resume instead of
+   dying), the iCloud/file-unreadable case (user downloads the file, then
+   resumes), and 507 (server disk freed, then resume). Hard 4xx (401 / 404
+   session_not_found / 413 …) get no Resume — retrying can't help. AbortError
+   is not transient and not an ApiError → no Resume, matching the cancel path. */
 function canResume(err) {
   if (isTransient(err)) return true;
   if (err instanceof ApiError) {
@@ -121,14 +204,18 @@ function sleepUnlessAborted(ms, isAborted) {
 }
 
 /* Run fn() with the retry/backoff policy. Throws the last error once attempts
-   are exhausted, a non-transient error occurs, or the upload is aborted. */
-async function withRetry(fn, { isAborted, onWait }) {
+   are exhausted, a non-transient error occurs, or the upload is aborted.
+   `tag` names the guarded call ("init"/"chunk") in the diag retry events. */
+async function withRetry(fn, { isAborted, onWait, tag }) {
   let lastErr = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     if (isAborted()) throw lastErr || new ApiError(0, "aborted", "Cancelled.");
     if (attempt > 0) {
       const base = RETRY_DELAYS_MS[attempt - 1];
       const delay = Math.round(base * (0.75 + Math.random() * 0.5));   // ±25% jitter
+      dlog("warn", "up.retry", {
+        tag, attempt, of: RETRY_DELAYS_MS.length, delay_ms: delay, reason: errMeta(lastErr),
+      });
       onWait && onWait(attempt, RETRY_DELAYS_MS.length, delay);
       await sleepUnlessAborted(delay, isAborted);
       if (isAborted()) throw lastErr || new ApiError(0, "aborted", "Cancelled.");
@@ -140,6 +227,9 @@ async function withRetry(fn, { isAborted, onWait }) {
       if (!isTransient(err)) throw err;
     }
   }
+  dlog("error", "up.retry.exhausted", {
+    tag, attempts: RETRY_DELAYS_MS.length + 1, reason: errMeta(lastErr),
+  });
   throw lastErr;
 }
 
@@ -149,17 +239,37 @@ async function withRetry(fn, { isAborted, onWait }) {
    active we hold a screen wake lock; the browser auto-releases it when the tab
    hides, so we re-acquire on visibilitychange while uploads remain active. */
 const wakeLock = (() => {
+  // NOTE (2026-06-10 incident): the Wake Lock API is secure-context-only, so on
+  // plain-HTTP LAN serving (the actual deployment) iOS Safari does not expose
+  // navigator.wakeLock at all → supported === false. The screen WILL sleep
+  // mid-upload there; the visible keep-screen-on hint below is the mitigation
+  // (HTTPS is the recorded long-term fix, out of scope here).
   const supported = typeof navigator !== "undefined" && "wakeLock" in navigator;
   let sentinel = null;
   let active = 0;
+  let lastFailed = false;   // most recent acquire attempt was rejected (low battery, policy …)
+  let onChange = null;      // single subscriber: the upload panel's keep-screen-on hint
+
+  function notify() { try { if (onChange) onChange(); } catch { /* hint is best-effort */ } }
 
   async function acquire() {
     if (!supported || sentinel || active === 0) return;
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     try {
       sentinel = await navigator.wakeLock.request("screen");
-      sentinel.addEventListener("release", () => { sentinel = null; });
-    } catch { sentinel = null; /* denied (low battery etc.) — hint covers it */ }
+      lastFailed = false;
+      dlog("info", "up.wakelock.ok");
+      sentinel.addEventListener("release", () => {
+        sentinel = null;
+        dlog("info", "up.wakelock.released");
+        notify();
+      });
+    } catch (e) {
+      sentinel = null;
+      lastFailed = true; /* denied (low battery etc.) — the visible hint covers it */
+      dlog("warn", "up.wakelock.fail", { err: String((e && e.message) || e || "").slice(0, 200) });
+    }
+    notify();
   }
 
   if (supported && typeof document !== "undefined") {
@@ -170,6 +280,12 @@ const wakeLock = (() => {
 
   return {
     supported,
+    /** True while the screen is actually being held awake. */
+    held: () => !!sentinel,
+    /** True when the latest acquire attempt was rejected (and nothing is held). */
+    failed: () => lastFailed,
+    /** Register the (single) hint-refresh callback. */
+    setOnChange(fn) { onChange = fn; },
     start() { active++; acquire(); },
     stop() {
       active = Math.max(0, active - 1);
@@ -198,22 +314,53 @@ export function initUpload({ getSessionId, onUploaded }) {
     accept: "video/*,.mp4,.mov,.mkv,.avi,.m4v", multiple: true,
     style: "display:none", "aria-hidden": "true", tabindex: "-1",
   });
-  /* Shown only while uploads are active AND the Wake Lock API is unavailable
-     (Safari support varies) — the screen sleeping would kill the upload. */
+  /* THE KEEP-SCREEN-ON NOTICE (2026-06-10 incident fix). On iOS over plain
+     HTTP the Wake Lock API is absent (secure-context-only) — the log showed
+     `up.wakelock.hint reason=unsupported` while the user's screen lock
+     suspended the tab and killed attempt 2. So whenever an upload is active
+     and no wake lock is actually protecting it (API unavailable, OR available
+     but the acquire was denied), this static, persistent inline notice shows
+     right above the progress rows and stays for the whole upload; it is
+     removed when the last upload settles or a wake lock is acquired. Plain
+     language, existing `.upload-hint` tokens, no markup from user data.
+     2026-06-11: the notice links the one-time /setup flow (trusting the local
+     CA → the https origin, where Wake Lock works and this notice never
+     shows). target=_blank + rel=noopener: navigating THIS tab away would
+     kill the in-flight upload the notice is warning about. */
   const wakeHint = el("p", { class: "upload-hint", hidden: true }, [
     icon("i-alert"),
-    el("span", { text: "Keep your screen on while uploading." }),
+    el("span", {}, [
+      "Keep the screen on and stay in this tab until the upload finishes — or ",
+      el("a", {
+        class: "upload-hint__link", href: "/setup", target: "_blank", rel: "noopener",
+        "aria-label": "Set up the secure address (opens in a new tab)",
+        text: "set up the secure address",
+      }),
+      " to make this automatic.",
+    ]),
   ]);
   const list = el("div", { class: "uploads" });
 
   mount.replaceChildren(dropzone, fileInput, wakeHint, list);
 
-  /* Ref-count of in-flight uploads — drives the wake lock + the no-wake-lock hint. */
+  /* Ref-count of in-flight uploads — drives the wake lock + the keep-screen-on
+     notice. The notice also refreshes on wake-lock state changes (acquire
+     success/denied/released) via wakeLock.setOnChange below, so a mid-upload
+     denial becomes visible too — not just the API-absent case. */
   let activeUploads = 0;
+  function updateWakeHint() {
+    const unprotected = !wakeLock.supported || (!wakeLock.held() && wakeLock.failed());
+    const showHint = activeUploads > 0 && unprotected;
+    if (showHint && wakeHint.hidden) {
+      dlog("info", "up.wakelock.hint", { reason: wakeLock.supported ? "acquire_failed" : "unsupported" });
+    }
+    wakeHint.hidden = !showHint;
+  }
+  wakeLock.setOnChange(updateWakeHint);
   function uploadActivity(delta) {
     activeUploads = Math.max(0, activeUploads + delta);
     if (delta > 0) wakeLock.start(); else wakeLock.stop();
-    wakeHint.hidden = !(activeUploads > 0 && !wakeLock.supported);
+    updateWakeHint();
   }
 
   dropzone.addEventListener("click", () => fileInput.click());
@@ -273,8 +420,18 @@ export function initUpload({ getSessionId, onUploaded }) {
       const files = Array.from(fileList || []);
       if (files.length === 0) return;        // picker dismissed with no selection
       for (const file of files) {
+        dlog("info", "up.pick", {
+          name: String(file.name || "").slice(0, 150),
+          size: file.size,
+          type: String(file.type || "").slice(0, 80),
+          lastModified: file.lastModified || 0,
+          client_id: clientIdFor(file),
+        });
         const err = validate(file);
-        if (err) { const row = addRow(file); row.fail(err); revealRow(row); toast(err, "bad"); continue; }
+        if (err) {
+          dlog("warn", "up.validate.fail", { name: String(file.name || "").slice(0, 150), reason: err });
+          const row = addRow(file); row.fail(err); revealRow(row); toast(err, "bad"); continue;
+        }
         // uploadOne owns its own try/catch (errors surface as a row + toast); we
         // also attach a catch on the returned promise as a final backstop so an
         // unexpected rejection can never be an unhandled, invisible failure.
@@ -416,12 +573,14 @@ export function initUpload({ getSessionId, onUploaded }) {
       fileName: file.name,
       fileSize: file.size,
       fileType: file.type,
+      startedAt: Date.now(),   // whole-file clock (spans retries + resumes) for the complete event
       abortCtrl: null,     // the CURRENT run's AbortController (null between runs)
       runPromise: null,    // the CURRENT run's settle promise (runUpload never rejects)
     };
 
     const cancelHandler = async () => {
       ctx.aborted = true;
+      dlog("info", "up.cancel", { upload_id: ctx.uploadId, client_id: ctx.clientId });
       ui.fail("Cancelled.");
       // ORDER MATTERS (cancel-race fix): (a) abort the in-flight fetch FIRST so
       // the server-side handle closes, (b) wait for the run to settle, (c) only
@@ -440,6 +599,7 @@ export function initUpload({ getSessionId, onUploaded }) {
        failure path can always reach it. */
     ctx.resume = () => {
       if (ctx.running || ctx.aborted) return;
+      dlog("info", "up.resume.click", { upload_id: ctx.uploadId, client_id: ctx.clientId });
       ui.resuming();
       ui.setCancel(cancelHandler);
       ctx.runPromise = Promise.resolve(runUpload(file, sessionId, ui, ctx, true));
@@ -479,7 +639,13 @@ export function initUpload({ getSessionId, onUploaded }) {
           received = new Set(Array.isArray(st && st.received) ? st.received : []);
           if (st && st.chunk_size) ctx.chunkSize = st.chunk_size;
           if (st && st.total_chunks) ctx.totalChunks = st.total_chunks;
-        } catch {
+          dlog("info", "up.reconcile.ok", {
+            upload_id: ctx.uploadId, received: received.size, total_chunks: ctx.totalChunks,
+          });
+        } catch (reconcileErr) {
+          dlog("warn", "up.reconcile.err", {
+            upload_id: ctx.uploadId, aborted: ctx.aborted, ...errMeta(reconcileErr),
+          });
           // Keep the id when the "failure" is our own cancel abort — the
           // cancelHandler still needs it for the explicit DELETE.
           if (!ctx.aborted) ctx.uploadId = null;   // stale id — re-init below (same client_id)
@@ -488,6 +654,9 @@ export function initUpload({ getSessionId, onUploaded }) {
       }
 
       if (ctx.uploadId == null) {
+        dlog("info", "up.init", {
+          client_id: ctx.clientId, size: ctx.fileSize, chunk_size: DEFAULT_CHUNK, resume: isResume,
+        });
         const init = await withRetry(() => api.post("/api/upload/init", {
           session_id: sessionId,
           filename: ctx.fileName,
@@ -498,12 +667,22 @@ export function initUpload({ getSessionId, onUploaded }) {
         }, { signal }), {
           isAborted,
           onWait: (n, total, ms) => ui.status(`Connection hiccup — retrying start (${n}/${total}) in ${Math.ceil(ms / 1000)}s…`),
+          tag: "init",
         });
         if (ctx.aborted) return;
         ctx.uploadId = init.upload_id;
         ctx.chunkSize = init.chunk_size || DEFAULT_CHUNK;
         ctx.totalChunks = init.total_chunks || Math.ceil(ctx.fileSize / (init.chunk_size || DEFAULT_CHUNK));
         received = new Set(Array.isArray(init.received) ? init.received : []);
+        // `mode` is the client-side inference (the response has no explicit flag):
+        // any pre-received chunks prove the server matched our client_id.
+        dlog("info", "up.init.ok", {
+          upload_id: ctx.uploadId,
+          mode: received.size > 0 ? "resumed" : "fresh",
+          received: received.size,
+          total_chunks: ctx.totalChunks,
+          chunk_size: ctx.chunkSize,
+        });
       }
 
       const chunkSize = ctx.chunkSize || DEFAULT_CHUNK;
@@ -537,9 +716,57 @@ export function initUpload({ getSessionId, onUploaded }) {
             "Couldn’t read the file — if it’s in iCloud, open it in Photos once to download it, then try again.");
         }
 
-        await withRetry(() => putChunk(ctx.uploadId, i, blob, signal), {
+        await withRetry(async () => {
+          // One start/finish pair PER ATTEMPT (withRetry re-runs this fn), so a
+          // stalled chunk is visible as a start with no matching ok/err.
+          const t0 = Date.now();
+          dlog("debug", "up.chunk.start", { id: ctx.uploadId, i, bytes: blob.size });
+
+          /* STALL WATCHDOG, one per attempt (see chunkTimeoutMs). The attempt
+             gets its OWN AbortController so the watchdog can kill just this
+             fetch; the run signal (user Cancel) is relayed into it so Cancel
+             still aborts the in-flight chunk instantly. Distinguishing the two
+             aborts: a watchdog abort sets `timedOut` BEFORE aborting, and ONLY
+             a watchdog-induced AbortError (timedOut && !ctx.aborted) is
+             rewritten into the transient ApiError(0,"timeout") that feeds the
+             backoff retry. A user-cancel AbortError keeps its identity → not
+             transient → withRetry rethrows → the outer catch's ctx.aborted
+             silence, exactly as before. The timer is cleared in finally on
+             EVERY settle (success, error, cancel), so it can never fire after
+             completion or leak across attempts; real fetch errors that race the
+             timer keep their own classification (only AbortError is rewritten). */
+          const attemptCtrl = new AbortController();
+          let timedOut = false;
+          const onRunAbort = () => { try { attemptCtrl.abort(); } catch { /* ignore */ } };
+          if (signal.aborted) onRunAbort();
+          else signal.addEventListener("abort", onRunAbort, { once: true });
+          const stallMs = chunkTimeoutMs(blob.size);
+          const watchdog = setTimeout(() => {
+            timedOut = true;
+            dlog("warn", "up.chunk.timeout", { id: ctx.uploadId, i, ms: stallMs });
+            try { attemptCtrl.abort(); } catch { /* ignore */ }
+          }, stallMs);
+
+          try {
+            const r = await putChunk(ctx.uploadId, i, blob, attemptCtrl.signal);
+            dlog("debug", "up.chunk.ok", { id: ctx.uploadId, i, ms: Date.now() - t0 });
+            return r;
+          } catch (chunkErr) {
+            let err = chunkErr;
+            if (timedOut && !ctx.aborted && chunkErr && chunkErr.name === "AbortError") {
+              err = new ApiError(0, "timeout",
+                "No response from the server — the connection stalled.");
+            }
+            dlog("warn", "up.chunk.err", { id: ctx.uploadId, i, ms: Date.now() - t0, ...errMeta(err) });
+            throw err;
+          } finally {
+            clearTimeout(watchdog);
+            try { signal.removeEventListener("abort", onRunAbort); } catch { /* ignore */ }
+          }
+        }, {
           isAborted,
           onWait: (n, total, ms) => ui.status(`Connection hiccup — retrying (${n}/${total}) in ${Math.ceil(ms / 1000)}s…`),
+          tag: "chunk",
         });
         if (ctx.aborted) return;
 
@@ -554,7 +781,13 @@ export function initUpload({ getSessionId, onUploaded }) {
          chunk received, the loop no-ops, and complete is attempted again. */
       phase = "complete";
       ui.status("Finishing…");
+      dlog("info", "up.complete.start", { upload_id: ctx.uploadId });
       const res = await api.post(`/api/upload/${encodeURIComponent(ctx.uploadId)}/complete`, {}, { signal });
+      dlog("info", "up.complete.ok", {
+        upload_id: ctx.uploadId,
+        ms: Date.now() - ctx.startedAt,
+        stored: basename((res && res.path) || ctx.fileName).slice(0, 150),
+      });
       ui.done(res && res.path);
       toast(`Uploaded ${ctx.fileName}.`, "ok");
       onUploaded && onUploaded(res, sessionId);
@@ -565,6 +798,9 @@ export function initUpload({ getSessionId, onUploaded }) {
       // tombstones cancelled uploads). The row already shows "Cancelled.".
       if (ctx.aborted) return;
       const msg = errorMessage(err, phase);
+      dlog("error", "up.fail", {
+        upload_id: ctx.uploadId, phase, resumable: canResume(err), ...errMeta(err),
+      });
       // NEVER api.del here — a transient failure must keep the server-side
       // partial state alive so Resume / re-pick can continue from received[].
       ui.fail(msg, canResume(err) ? { onResume: () => ctx.resume && ctx.resume() } : undefined);

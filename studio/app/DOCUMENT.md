@@ -24,7 +24,12 @@ per-user tree. Every per-session request carries a client-carried `session_id`
   [empty meta-less `ses_*` dirs only], warms the frontend `asset_version`
   cache, prints the startup banner via `net` — every sweep is best-effort and
   never blocks boot), mounts every router (incl. the new `sessions` router; the
-  `fs` router is gone), serves the SPA at `/` and `/static`.
+  `fs` router is gone), serves the SPA at `/` and `/static`. Also registers
+  **`_EffectiveBindLogger`** (2026-06-10 P2 fix), a one-shot pure-ASGI
+  middleware that logs the REAL bind (`effective bind host=… port=…`) from the
+  first http request's `scope["server"]` tuple — because the lifespan startup
+  line can only know the CONFIGURED settings values, which lie when uvicorn is
+  launched with explicit `--host`/`--port` flags.
 - `settings.py` — all paths, host/port, upload cap, **multi-user login map
   (`users()`) + session secret + first-run auto-generated password**, real
   ffmpeg/ffprobe/version + ELEVENLABS key (with source) + `has_anthropic_api_key`
@@ -47,9 +52,11 @@ per-user tree. Every per-session request carries a client-carried `session_id`
 
 ## Auth model (Delta 1 + Delta 3) — multi-user, single mechanism
 Username/password login (`POST /api/login`) is validated against a configured
-**set of accounts** and mints a signed, httpOnly, SameSite=Lax `studio_session`
-cookie (NOT Secure — plain http on the LAN) recording WHICH username
-authenticated. The browser sends it automatically on every request incl. SSE and
+**set of accounts** and mints a signed, httpOnly, SameSite=Lax session cookie
+recording WHICH username authenticated. **Scheme-aware since 2026-06-11:**
+over http the cookie is `studio_session` (NOT Secure — unchanged); over https
+it is `__Host-studio_session` (Secure, Path=/, no Domain). Same token format;
+`deps.current_user` reads `__Host-` first; logout clears both. The browser sends it automatically on every request incl. SSE and
 media, so there is no token-in-URL. `POST /api/logout` clears it; `GET /api/me`
 (public) returns the cookie's username and gates the UI. Everything else under
 `/api/*` requires the cookie (`require_session` → 401). Accounts: the `[users]`
@@ -102,10 +109,13 @@ and transcript-write failures (non-fatal — videos still move, marker still
 written, no duplicate on reboot).
 
 ## Boot entrypoint
-`app.main:app` (uvicorn). Verified (2026-06-10): `create_app()` imports clean;
-**29 routes** registered (28 API routes + the `/static` mount — the same "29"
-PM/overview counts). No route was added or removed by the 2026-06-10
-red-thread-uploads pass.
+**`python -m app.serve`** (the dual-listener launcher; what `start.bat` /
+`start.sh` run since 2026-06-11) — or the legacy `app.main:app` under plain
+uvicorn (still works, HTTP-only). Verified (2026-06-11, Secure Studio pass):
+`create_app()` imports clean; **33 routes** registered (32 API routes + the
+`/static` mount). Count lineage: 29 → 30 when diagnostic logging added
+**`POST /api/client-log`**; 30 → 33 when Secure Studio added **`GET /ca.crt`**,
+**`GET /setup`**, **`GET /api/tls/info`**.
 
 ## Feature: fully managed per-user sessions (2026-06-08)
 The cutover from a single global `active_folder` to per-user, user-owned,
@@ -212,12 +222,117 @@ part-dir deletion + locked-dir tolerance, 499/assemble-failure resume
 invariants, plus all prior checks) and a real uvicorn boot on :8433
 (`GET /api/me` 200, sane shape). Route count unchanged at 29.
 
+## Feature: diagnostic logging system (2026-06-10, live-incident tooling)
+Backend half of the diagnostic-logging plan (`PM/plan-2026-06-10-logging.md`);
+the parallel frontend pass ships `diag.js` + uploader instrumentation. Trigger:
+a phone upload stalled in total client silence and the only server log was the
+start.bat console window. ADDITIVE ONLY — zero semantic changes to request
+handling (the same suite that froze the upload/auth/session contracts re-ran
+green).
+- **`core/applog.py` (NEW)** — rotating file log
+  `studio/.runtime/logs/studio.log` (UTF-8, ~5 MB × 5 backups, gitignored under
+  `.runtime/`), line format `2026-06-10 19:30:01.123 INFO  studio.upload | msg
+  key=value`. Initialized FIRST thing in `create_app()` (+ defensively at
+  lifespan start); idempotent and best-effort everywhere — a logging failure
+  can never break the app. Attaches the same handler to `uvicorn.access` /
+  `uvicorn.error` so HTTP access lines land in the file (uvicorn's console
+  output untouched; works from inside the app because start.bat launches
+  `python -m uvicorn` without log flags). Console behavior for `studio.*` is
+  preserved via an explicit stderr handler at WARNING (replacing the implicit
+  lastResort). `sanitize_log_value()` strips C0/C1 control chars (no CR/LF
+  log-line forgery) + caps length for every client-influenced value.
+- **Instrumentation (one logger per area, observation only):**
+  `studio.upload` (init fresh/resumed with user/session/upload_id/filename/
+  size/chunk_size/client_id/received_count; EVERY chunk-PUT exit path with
+  bytes + duration_ms + status + outcome incl. 499/tombstone-404/413/oserror;
+  complete with stored_name/total_bytes/duration; cancel with swept=yes|no),
+  `studio.auth` (login ok/fail with username + client IP — NEVER the password;
+  logout), `studio.session` (create/open/delete with id + owner),
+  `studio.agent` (chat turn start/end with duration + ok/error/incomplete —
+  "incomplete" = the stream was torn down mid-turn, the silent-phone
+  signature), `studio.job` (start/end + outcome + duration at the `core/jobs.py`
+  chokepoint — covers transcribe AND render regardless of whether the REST
+  router or an agent chat tool started them; the transcribe router adds one
+  correlation line with session/user/file counts), and a structured `startup`
+  facts line (version, asset_version, **`configured_host`/`configured_port`**
+  — relabeled 2026-06-10 because the settings values are all the lifespan can
+  know and the old `host=`/`port=` keys claimed port=8420 for instances really
+  bound elsewhere; the true bind is the one-shot `effective bind` line from
+  `_EffectiveBindLogger` — LAN IP via `net.lan_ip`, the log file path). The
+  existing GC/husk-sweep lifespan lines now persist to the file too.
+- **`routers/client_log.py` (NEW) — `POST /api/client-log`** (route 30):
+  auth-gated ingestion for the frontend's `diag.js`; each shipped event becomes
+  one `studio.client` line. Caps: body ≤ 64 KiB (413), ≤ 200 events (400
+  `invalid_body`), msg ≤ 500 chars, data ≤ ~2 KiB — full contract in
+  `routers/DOCUMENT.md`.
+Verified by the extended 161-check isolated-runtime suite (all prior checks
+green + log-content assertions + the client-log contract + a grep proving NO
+password/cookie value ever lands in the produced log) and a real uvicorn boot
+on :8433 whose access lines + startup facts were asserted in the REAL log file.
+
+## Feature: Secure Studio — HTTPS on the home LAN (2026-06-11)
+Backend half of `PM/plan-2026-06-11-https.md` (frontend ships `setup.html` +
+the `#secure-banner` in parallel). Driver: iOS only grants the Screen Wake
+Lock API in a secure context — over plain http, large phone uploads die when
+the screen locks. Route count 30 → 33.
+- **`app/serve.py` (NEW)** — dual-listener launcher: TWO programmatic
+  `uvicorn.Server`s over the same `app.main:app` in ONE asyncio loop / ONE
+  process (shared upload registry / agent cache / jobs / SSE bus / log
+  handler). HTTP `:8420` lifespan-on (byte-identical to the old uvicorn
+  line); HTTPS `:8443` `ssl_certfile/ssl_keyfile` + `lifespan="off"` (startup
+  logic runs exactly once). `_QuietSignalServer` disables uvicorn's
+  per-server `capture_signals` (two servers would fight over handlers) and
+  ONE process-wide SIGINT/SIGTERM/SIGBREAK handler sets `should_exit` on
+  BOTH (second Ctrl+C → `force_exit`). Verified with a REAL console
+  CTRL_BREAK event: one keystroke exits the process rc=0 and releases both
+  ports. Logging order is load-bearing: dictConfig(uvicorn LOGGING_CONFIG) →
+  `applog.init_logging()` → both Configs built with `log_config=None` (a
+  second dictConfig would wipe the file handler off the uvicorn loggers).
+  HTTPS failures are contained (`_serve_https_guarded` catches even
+  uvicorn's bind-failure `SystemExit`) — TLS can NEVER take down HTTP.
+- **`app/core/tls.py` (NEW)** — cert logic, no FastAPI imports; see
+  `core/DOCUMENT.md`. `ensure_certs() -> TlsPaths|None`, never raises.
+- **`app/routers/tls.py` (NEW)** — `GET /ca.crt` (DER, inline,
+  `application/x-x509-ca-cert`; 404 `tls_disabled` when off), `GET /setup`
+  (FileResponse of `frontend/setup.html`, no-cache, 503-if-missing),
+  `GET /api/tls/info` (exact plan shape, nulls on failure, never 5xx). All
+  public by design (plan §6) — they expose only public material and take
+  zero user input.
+- **Scheme-aware cookies** (`routers/auth.py` + `routers/deps.py`): https
+  login → `__Host-studio_session` (Secure + Path=/ + NO Domain — prefix
+  integrity rules stop insecure-origin cookie planting); http login →
+  legacy `studio_session` unchanged; same HMAC token format; `current_user`
+  verifies `__Host-` FIRST then falls back; logout clears both (the
+  `__Host-` deletion itself carries Secure+Path=/ or browsers reject it).
+  `GET /api/me` adds `secure_url` (https LAN URL | null). **NO HSTS**
+  anywhere (deliberate — it would force-upgrade the http bootstrap origin).
+- **`settings.py`**: `TLS_ENABLED` (env `STUDIO_TLS` / `[server] tls`,
+  default true), `TLS_PORT` (env `STUDIO_TLS_PORT` / `[server] tls_port`,
+  default 8443), `TLS_DIR` (`.runtime/tls/`), `SECURE_SESSION_COOKIE_NAME`.
+- **`net.py`**: `hostname_local()` (ASCII-validated, lowercased
+  `<hostname>.local` | None); `firewall_hint(*ports)`; banner gains the
+  Secure-URL block + the `/setup` first-time-phone hint + a LOUD CA-regen
+  warning; **the QR stays http** (first contact must be scare-screen-free).
+- Run-mode nuance (documented): under plain `-m uvicorn`, `tls.is_enabled()`
+  falls back to "configured AND cert files valid" — whether the TLS port
+  answers is unknowable there; `serve.py` stamps the truth via
+  `tls.set_serving()`.
+Verified by the extended **271-check** suite (all prior checks green):
+§2 cert-spec parse assertions, CA-stability/corruption/fallback-flag regens,
+live dual-listener boot on :8435/:8436 with chain verification against
+`ca.pem`, live cookie matrix both schemes, no-HSTS, STUDIO_TLS=0 parity, and
+the real-console CTRL_BREAK shutdown (both ports released, rc=0).
+
 ## Constraints honored
 - Routers never shell out or import helper modules directly — they go through
   `helpers_wrap/`. `agent/` is the only package that imports `claude_agent_sdk`.
 - Single-flight per job type (one render, one transcribe) via `core/jobs`.
 - **Ownership chokepoint:** a session path is only ever built from a client string
   through `core.sessions.get`/`resolve_dir` (owner + id-regex + inside-root).
+- **Logging discipline (2026-06-10):** no passwords, cookie values, or session
+  tokens in any log line; client-influenced values pass through
+  `core.applog.sanitize_log_value`; logging is best-effort and never alters
+  request handling.
 
 ## Bug fixes (2026-06-08)
 - **main.py — startup banner on non-UTF-8 stdout (BUG-20):** the QR's Unicode

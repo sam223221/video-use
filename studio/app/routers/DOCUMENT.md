@@ -18,16 +18,40 @@ missing id is one uniform **`404 session_not_found`** (the old `no_active_folder
 ## Status — IMPLEMENTED
 - `deps.py` — `current_user`/`require_session` (session-cookie auth, 401) +
   **`require_session_dir`** (the per-request ownership resolution → 404
-  session_not_found) + `http_error`.
+  session_not_found) + `http_error`. **2026-06-11 (Secure Studio):**
+  `current_user` is dual-name — it verifies the `__Host-studio_session`
+  cookie FIRST, then falls back to the legacy `studio_session` (same HMAC
+  token format; one validator), so sessions work across both schemes.
 - `auth.py` — **`POST /api/login`** (multi-user, signed cookie, one
   indistinguishable 401), **`POST /api/logout`**, **`GET /api/me`** (public —
-  `{authenticated, username, stale_sessions, asset_version}`; `stale_sessions`
-  is the COUNT of the caller's sessions idle > 14 days, full list at
-  `/api/sessions`; **`asset_version`** (2026-06-10) is the frontend
+  `{authenticated, username, stale_sessions, asset_version, secure_url}`;
+  `stale_sessions` is the COUNT of the caller's sessions idle > 14 days, full
+  list at `/api/sessions`; **`asset_version`** (2026-06-10) is the frontend
   `ASSET_VERSION` the server is serving — regex-parsed READ-ONLY from
   `frontend/app.js`, cached by mtime so a frontend bump lands without a backend
   restart, `null` on ANY parse failure, never hardcoded — used by long-lived
-  tabs for stale-frontend detection).
+  tabs for stale-frontend detection). **2026-06-11 (Secure Studio):**
+  scheme-aware cookie issue — `request.url.scheme` (trustworthy: direct
+  uvicorn, no proxy) picks the cookie name: https → `__Host-studio_session`
+  (Secure + Path=/ + NO Domain), http → legacy `studio_session` byte-identical
+  to before; logout clears BOTH names (the `__Host-` deletion itself carries
+  Secure+Path=/ per the prefix rules); `/api/me` adds **`secure_url`** (the
+  https LAN URL when TLS is up, else null — best-effort, never breaks /api/me).
+  Login logging unchanged (+ a `scheme=` key); tokens/passwords never logged.
+  **NO HSTS** is ever sent (deliberate — plan §6).
+- `tls.py` — **NEW (2026-06-11, Secure Studio): 3 PUBLIC routes, zero user
+  input** (route count 30 → 33). **`GET /ca.crt`** — the local CA cert as
+  DER, `application/x-x509-ca-cert`, `Content-Disposition: inline` (iOS must
+  OPEN it to offer profile install); 404 `tls_disabled` envelope when TLS is
+  off/unavailable. **`GET /setup`** — FileResponse of `frontend/setup.html`
+  (login-free onboarding; owned by the Frontend Engineer), `Cache-Control:
+  no-cache`, BOTH schemes, 503 "frontend assets not built" when missing
+  (same guard as the SPA index). **`GET /api/tls/info`** — exact contract
+  shape `{enabled, https_url, host_local_url, http_url, ca_sha256,
+  leaf_expires}`; nulls on failure; NEVER 5xx (the setup page must always
+  render). State is read lazily from `core/tls.py` (`is_enabled()` +
+  mtime-cached `get_state()`); under the legacy `-m uvicorn` entrypoint
+  `enabled` degrades to "configured AND cert files valid" (documented).
 - `status.py` — `GET /api/status` (ffmpeg+version, ffprobe, ELEVENLABS key +
   source, dual-mode agent_auth, version). **No longer leaks** active_folder,
   allowed_roots, or any internal path.
@@ -146,8 +170,81 @@ the answer here (a NORMAL POST + JSON body, NOT a stream).
     helper discovery (`suffix in VIDEO_EXTS`) finds the assembled file; the
     collision rename operates on the normalized name (`CLIP (2).m4v`).
 
+- `client_log.py` — **NEW (2026-06-10, diagnostic-logging plan): `POST
+  /api/client-log`** — phone-side diagnostics ingestion (route count 29 → 30
+  incl. the `/static` mount). Auth-gated (`deps.require_session` → 401).
+  Body `{events:[{t:<epoch_ms>, level:"debug|info|warn|error", msg:<str>,
+  data?:<obj>}, ...]}`. Each event becomes ONE `studio.client` line in the
+  rotating file log: `client user=<u> ip=<ip> ua="<first-80-of-UA>" | <level>
+  t=<t> <msg> <json data>`. Enforced caps: raw body ≤ 64 KiB → **413
+  `payload_too_large`** (streamed read, never fully buffered past the cap);
+  > 200 events → **400 `invalid_body`**; msg truncated at 500 chars; data
+  JSON-dumped + capped ~2 KiB/event. A garbage / non-JSON / wrong-shape body
+  is a clean **400 `invalid_body`** envelope (manual parse, never a 422 array,
+  never a 500) — including a deeply-nested body (e.g. 60 KB of `[`) that blows
+  `json.loads`' recursion limit: `RecursionError` is caught alongside
+  `ValueError` (and likewise at the per-event `json.dumps`, where a
+  pathological `data` object degrades to `<unserializable>`); a mid-POST
+  disconnect → 499 `client_disconnected`. All client
+  strings pass `applog.sanitize_log_value` (C0/C1 control chars stripped — no
+  log-line/CRLF forgery; lengths capped); a malformed EVENT inside a valid
+  batch is skipped + counted (`dropped` summary line) so one mangled event
+  never loses the other 199. `debug` events are recorded at INFO (the file
+  logger filters below INFO; the client's claimed level stays in the line
+  text). Content-Type is deliberately NOT restricted: the `sendBeacon`
+  pagehide tail may ship as `text/plain`, and that dying-tab batch is the
+  most valuable one — the residual CSRF exposure is bounded, sanitized noise
+  in a private log, accepted + documented in the module docstring.
+
+## Logging instrumentation (2026-06-10, diagnostic-logging plan — ADDITIVE)
+Routers now write structured key=value lines to the rotating file log
+(`core/applog.py`); request handling is unchanged on every path:
+- `upload.py` (`studio.upload`): init fresh/resumed (user, session_id,
+  upload_id, sanitized filename, size, chunk_size, client_id, received_count)
+  + init rejects; EVERY chunk-PUT exit (bytes, duration_ms, status, outcome ∈
+  ok / ok_idempotent / client_disconnected[_drain] 499 / upload_not_found[_
+  cancelled] 404 / upload_too_large 413 / bad_index / oserror 500); complete
+  (stored_name, total_bytes, duration_ms, plus failure outcomes — the
+  `assemble_failed` line carries a sanitized `reason=` with the server-side
+  OSError text); cancel
+  (swept=yes|no|unknown — whether the part dir is gone now or left for the
+  writer sweep/boot GC).
+- `auth.py` (`studio.auth`): login ok/fail with username + client IP (the
+  fail-path username is sanitized/capped; the password is NEVER logged — the
+  docstring's logging policy was updated to match the plan), logout. The 401
+  response stays indistinguishable (anti-enumeration unchanged); `login`/
+  `logout` gained a `request: Request` parameter (FastAPI-injected, no API
+  change).
+- `sessions.py` (`studio.session`): create/open/delete with id + owner; the
+  `create_failed` line carries a sanitized `reason=` with the OSError text.
+- `chat.py` (`studio.agent`): turn start (session_id, user, msg LENGTH only —
+  never content) and turn end (duration_ms, tool_calls count, outcome
+  ok/error/incomplete — "incomplete" means the SSE generator was torn down
+  before turn_end, i.e. the tab/phone vanished mid-turn). The end line logs
+  from `finally` WITHOUT yielding (BUG-15 discipline).
+- `transcribe.py` (`studio.job`): one correlation line per started job
+  (job_id, session_id, user, files, already_cached) + the job_in_flight
+  reject; generic start/end with outcome live at the `core/jobs.py`
+  chokepoint (covers agent-started render/transcribe too).
+
+## Feature: Secure Studio routes + scheme-aware cookies (2026-06-11)
+Backend half of `PM/plan-2026-06-11-https.md` (the dual listener itself is
+`app/serve.py`; cert logic is `core/tls.py`). Route count **30 → 33**: NEW
+`tls.py` adds the public `GET /ca.crt` (DER, inline, 404 `tls_disabled` when
+off), `GET /setup` (no-cache FileResponse, 503-if-missing), `GET /api/tls/info`
+(exact contract shape, nulls on failure, never 5xx). `auth.py` issues
+`__Host-studio_session` on https logins (legacy `studio_session` on http,
+byte-identical to before), clears BOTH on logout, and `/api/me` gained
+`secure_url`; `deps.current_user` reads `__Host-` first then legacy. NO HSTS.
+Upload/chat/session/SSE handler semantics untouched. Verified by the extended
+271-check suite (cookie matrix over both schemes incl. a LIVE dual-listener
+boot with chain verification, envelope discipline on `tls_disabled`, no-HSTS
+sweep, STUDIO_TLS=0 byte-parity) — all prior checks green.
+
 ## Constraints honored
-- Auth on every `/api/*` route except login/logout/me + the SPA/static.
+- Auth on every `/api/*` route except login/logout/me + the SPA/static —
+  plus the three deliberately-public Secure Studio routes (`/ca.crt`,
+  `/setup`, `/api/tls/info`): public material only, zero user input (plan §6).
 - **Ownership chokepoint:** per-session routes resolve via
   `deps.require_session_dir` (owner + id-regex + inside-root); cross-user/bad/
   missing → uniform 404 session_not_found (no existence leak).

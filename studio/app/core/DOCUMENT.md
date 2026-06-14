@@ -46,7 +46,13 @@ one uniform `404 session_not_found` (IDOR-safe).
   thread-safe) + `JobRegistry` with **single-flight per kind** (`create()`
   returns the running job if one is in flight → caller emits `409 job_in_flight`).
   Progress is the single source feeding both the chat `tool_progress` SSE and the
-  REST transcribe SSE.
+  REST transcribe SSE. **2026-06-10 (diagnostic logging, additive):** this is
+  the SINGLE chokepoint every transcribe AND render job passes through — REST
+  router or agent chat tool alike — so `registry.create` logs `start kind=
+  job_id=` and `finish_ok`/`finish_error`/`mark_cancelled` log `end job_id=
+  kind= outcome= duration_ms=` (logger `studio.job`; error messages pass
+  `applog.sanitize_log_value` since subprocess stderr can be multi-line; log
+  calls sit OUTSIDE the registry/job locks). No behavioral change.
 - `uploads.py` — `UploadSession` now carries its owning **`session_id`** and the
   `dest_folder` is that session's dir; chunk PARTS still live in the temp
   `.runtime/uploads/<id>/<n>.part` dir, but `assemble()` writes the finished file
@@ -80,6 +86,56 @@ one uniform `404 session_not_found` (IDOR-safe).
     the mtime threshold (both guards required — active uploads are never
     touched). Best-effort, never raises; returns the removed names for the
     caller (main.py lifespan) to log.
+- `applog.py` — **NEW (2026-06-10, diagnostic-logging plan): rotating file
+  logging.** `init_logging()` attaches a `RotatingFileHandler` →
+  `studio/.runtime/logs/studio.log` (UTF-8 with `errors="replace"`, ~5 MB ×
+  5 backups ⇒ ~30 MB disk cap) to the `studio` logger (level INFO,
+  `propagate=False`, plus an explicit stderr handler at WARNING that preserves
+  the pre-existing lastResort console behavior) AND to `uvicorn.access` /
+  `uvicorn.error` (handler appended only — their console output/levels are
+  untouched), so HTTP access lines persist too. Line format:
+  `2026-06-10 19:30:01.123 INFO  studio.upload | msg key=value`. Idempotent
+  (tagged handler, one attempt per process) and best-effort top to bottom — a
+  failed mkdir/dead disk means the app simply runs file-log-less, never an
+  exception. Called first in `create_app()` (import time under uvicorn) +
+  defensively at lifespan start. `sanitize_log_value(value, max_len)` is the
+  shared scrubber for client-influenced values (C0/C1 control chars → space,
+  so no CR/LF log-line forgery; length-capped; never raises);
+  `log_file_path()` reports the active file for the startup facts line.
+  Imports only `settings` (acyclic; safe for both routers and core modules).
+- `tls.py` — **NEW (2026-06-11, Secure Studio plan): local CA + leaf TLS
+  certificates.** Pure cert logic (`cryptography==48.0.0` x509 builder API;
+  NO FastAPI imports; imports only `net` + `settings`). **`ensure_certs() ->
+  TlsPaths | None`** makes `.runtime/tls/` hold a valid pair every launch and
+  NEVER raises (None ⇒ HTTPS unavailable, caller serves HTTP-only — the
+  applog best-effort discipline). Plan-§2-verbatim spec: EC P-256 PKCS8 keys
+  (0600 POSIX); CA = BC CA:true (critical) + keyUsage keyCertSign,cRLSign
+  (critical) + SKI + **nameConstraints (critical)** (dNSName `.local`/
+  `localhost`, iPAddress 192.168/16, 10/8, 172.16/12, 127/8) + 10y validity
+  − 48h backdate + CN `video-use Studio CA <hostname> <8-hex-fp>` + random
+  128-bit serial; leaf = SANs (`localhost`, `<hostname>.local`, `127.0.0.1`,
+  every current private IPv4 — collected via `getaddrinfo(gethostname())` +
+  `net.lan_ip()`, deduped, FILTERED to RFC1918+loopback so no SAN can fall
+  outside the constraints) + EKU serverAuth + keyUsage digitalSignature +
+  397d − 48h + AKI, ECDSA-SHA256-signed by the CA. **Regen rules:** CA is
+  STABLE — regenerated only on missing/unparseable/key-mismatch (damaged
+  files preserved as `*.bad-<ts>`, LOUD warning + banner: phones must redo
+  Secure Setup; a FIRST-run creation is informational, not loud); leaf is
+  silently re-issued on missing/unparseable/key-mismatch/not-signed-by-
+  current-CA/<30d-to-expiry/`lan_ip()`-not-in-IP-SANs/`<hostname>.local`-
+  not-in-DNS-SANs. No metadata sidecar — everything re-derived by parsing.
+  `ensure_certs` also sweeps stale `*.tmp` leftovers (crashed `_atomic_write`;
+  may hold key bytes) from `.runtime/tls/` at the start of each run —
+  best-effort unlink, `*.bad-<ts>` forensic files never touched.
+  **`CA_NAME_CONSTRAINTS`** module constant is the documented fallback: set
+  False to regenerate the CA WITHOUT nameConstraints if a device rejects the
+  constrained chain (the flag-vs-disk mismatch triggers the regen).
+  Read-side: `get_state()` (mtime-cached PEM parse → `{available, ca_sha256,
+  leaf_expires, sans}`; never raises), `ca_der()` (for `GET /ca.crt`),
+  `set_serving(bool)` (serve.py stamps whether HTTPS is actually up) +
+  `is_enabled()` (serve decision wins; legacy `-m uvicorn` entrypoint falls
+  back to configured-AND-files-valid — documented nuance),
+  `ca_regenerated_this_boot()` (banner warning hook). Keys are never logged.
 - `events.py` — `sse(event, data)` / `sse_comment(text)` — the exact
   `event:/data:` SSE framing used by both SSE endpoints.
 - `persist.py` — atomic JSON chat-transcript persistence at
@@ -95,6 +151,9 @@ one uniform `404 session_not_found` (IDOR-safe).
 - All persistence lives in `studio/.runtime/` (gitignored).
 - Thread-safe: jobs/uploads/sessions guard mutable state with locks; the worker
   coroutine updates job progress while the SSE consumer reads it.
+- **TLS (2026-06-11):** `ensure_certs` never raises (TLS can never block
+  boot); the CA stays stable across leaf regens (phones trust ONCE); private
+  keys never appear in any log line or HTTP response.
 
 ## Feature: per-user sessions cutover (2026-06-08)
 Replaced the single global `active_folder` with per-user, user-owned, upload-only

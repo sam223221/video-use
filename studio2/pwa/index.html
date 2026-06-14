@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <!-- viewport-fit=cover: safe-area env() insets in standalone mode.
+       interactive-widget=resizes-content: engines that honor it (Chromium)
+       resize the LAYOUT viewport for the keyboard so the flex layout handles
+       it natively; iOS ignores it and the visualViewport watcher in editor.js
+       takes over (M1.1 keyboard-aware composer). -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0a0d10" />
+  <meta name="description" content="Studio v2 — edit your videos by conversation, on your phone. Footage never leaves the device." />
+  <title>Studio v2</title>
+
+  <!-- PWA wiring. NOTE for the relay: /manifest.webmanifest and /sw.js must be
+       served from the SITE ROOT (alias → pwa/manifest.webmanifest, pwa/sw.js,
+       no-cache — same pattern as GET / → index.html). The service worker needs
+       root scope to control start_url "/" for the offline shell. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/static/assets/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Studio" />
+
+  <!-- Inline SVG favicon (the splice mark) as a data-URI: zero extra requests. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0d10'/%3E%3Cpath d='M9 7.5l7.2 3.6-1 11.6L9 24.5z' fill='%2334d8cb'/%3E%3Cpath d='M18 12.5l6 3.5-6.6 3.9z' fill='%236ce8de'/%3E%3C/svg%3E" />
+
+  <!-- Preload the display + body faces so the first paint is on-brand. -->
+  <link rel="preload" href="/static/assets/fonts/bricolage-grotesque-600.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/static/assets/fonts/schibsted-grotesk-400.woff2" as="font" type="font/woff2" crossorigin />
+
+  <!-- Cache-busting version query (v2's OWN lineage; "11" = M3 RENDER TIER
+       (format + mixed-orientation combine + music): NEW engine render spine
+       (webcodecs/compositor/audiomix/duck/render.js + canvas.js), store/music.js,
+       the music-ops/format-ui/music-ui modules + the bundled CC0 catalog all
+       join the precache; bridge.js gains the 6 M3 executors; export.js gains
+       tier auto-select + the render-tier export; player.js gains the §8b preview
+       overlay (CSS fit/blur + WebAudio music). The 8 .m4a beds LAZY-LOAD (not
+       precached, ~29 MB). "10" = Agent Vision (view_frames); "9" multi-select
+       video ingest; "8" the global Agent Model Picker; "7" M2 transcription;
+       "6" the M1.2 QA P2 fixes; "5" M1.1 phone navigation). Bump in lockstep:
+       this file (×2), app.js ASSET_VERSION, sw.js ASSET_VERSION, setup.html ?v=. -->
+  <link rel="stylesheet" href="/static/styles.css?v=12" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <!-- fixed top-center banner stack: update / secure / offline share one flex
+       column so any combination can show without overlapping (app.js drives
+       visibility; the stack ignores pointer events while empty). -->
+  <div class="banner-stack">
+
+    <!-- stale-frontend banner: shown by app.js ONLY when /api/me reports a
+         NEWER asset_version than this page (never on null/equal/older). -->
+    <div class="app-banner" id="update-banner" hidden role="status">
+      <span class="app-banner__text">Studio was updated — refresh to get the latest.</span>
+      <button class="btn btn--primary btn--sm" id="update-refresh" type="button">Refresh</button>
+      <button class="icon-btn" id="update-dismiss" type="button" aria-label="Dismiss update notice">
+        <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+      </button>
+    </div>
+
+    <!-- secure-context banner: shown ONLY on an insecure origin while /api/me
+         reports a secure_url. Phones that completed v1's Secure Setup already
+         trust the shared certificate — the https address just works. -->
+    <div class="app-banner" id="secure-banner" hidden role="status">
+      <span class="app-banner__text">Use the secure address to install Studio on your
+        Home Screen and edit with the screen allowed to lock.</span>
+      <a class="btn btn--primary btn--sm" id="secure-setup-link" href="/setup"
+         target="_blank" rel="noopener"
+         aria-label="Set up the secure address (opens in a new tab)">Set up</a>
+      <button class="icon-btn" id="secure-dismiss" type="button" aria-label="Dismiss secure-address notice">
+        <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-close"></use></svg>
+      </button>
+    </div>
+
+    <!-- offline banner: the relay is unreachable. Projects, preview and export
+         keep working (they live on this device); only chat needs the brain. -->
+    <div class="app-banner app-banner--offline" id="offline-banner" hidden role="status">
+      <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-offline"></use></svg>
+      <span class="app-banner__text"><b>Studio brain unreachable.</b> Your projects still
+        open — editing by chat needs your home connection.</span>
+    </div>
+
+  </div>
+
+  <div id="app" data-view="loading">
+
+    <!-- ===================================================================
+         LOADING / BOOT SPLASH
+    ==================================================================== -->
+    <div id="view-loading" data-view aria-busy="true" aria-live="polite">
+      <span class="brand__mark brand__mark--lg boot-mark" aria-hidden="true"></span>
+      <span class="spinner" role="status" aria-label="Loading Studio"></span>
+      <p class="mono" style="color:var(--ink-faint);font-size:.85rem">Starting Studio…</p>
+    </div>
+
+    <!-- ===================================================================
+         UNSUPPORTED — the Tier-1 floor full stop (no OPFS / createWritable)
+    ==================================================================== -->
+    <main id="view-unsupported" data-view>
+      <div class="unsupported">
+        <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+        <h1>This browser can’t run Studio</h1>
+        <p id="unsupported-detail">This browser is missing a required feature, which Studio
+           needs to keep your videos on this device.</p>
+        <p>On iPhone, open this address in <b>Safari</b>. On a computer, use a current
+           Chrome, Edge or Safari.</p>
+        <p class="hint">Your videos never leave your device — that’s why Studio needs a
+           browser that can store them properly.</p>
+      </div>
+    </main>
+
+    <!-- ===================================================================
+         LOGIN VIEW
+    ==================================================================== -->
+    <main id="view-login" data-view>
+      <section class="login" aria-labelledby="login-title">
+        <header class="login__head">
+          <span class="brand">
+            <span class="brand__mark brand__mark--lg" aria-hidden="true"></span>
+          </span>
+          <div>
+            <h1 id="login-title" class="login__title">Studio <span class="accent">v2</span></h1>
+            <span class="login__deco" aria-hidden="true"></span>
+            <p class="login__sub">Sign in to edit by conversation. Your footage stays on
+              this phone — only your words travel.</p>
+          </div>
+        </header>
+
+        <div class="login__card">
+          <form id="login-form" class="login__form" novalidate autocomplete="on">
+            <div class="field">
+              <label for="login-username">Username</label>
+              <input class="input" id="login-username" name="username" type="text"
+                     autocomplete="username" autocapitalize="none" autocorrect="off"
+                     spellcheck="false" required inputmode="text" />
+            </div>
+
+            <div class="field">
+              <label for="login-password">Password</label>
+              <div class="input-wrap">
+                <input class="input" id="login-password" name="password" type="password"
+                       autocomplete="current-password" required />
+                <button type="button" class="icon-btn reveal" id="login-reveal"
+                        aria-pressed="false" aria-label="Show password">
+                  <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-eye"></use></svg>
+                </button>
+              </div>
+            </div>
+
+            <p class="form-error" id="login-error" role="alert" aria-live="assertive">
+              <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+              <span id="login-error-text">Invalid credentials.</span>
+            </p>
+
+            <div class="login__row">
+              <label class="checkbox">
+                <input type="checkbox" id="login-remember" name="remember" checked />
+                Remember me
+              </label>
+            </div>
+
+            <button type="submit" class="btn btn--primary btn--block" id="login-submit">
+              <span class="btn__label">Sign in</span>
+            </button>
+          </form>
+        </div>
+
+        <p class="login__foot">
+          Home studio · same sign-in as before · nothing leaves your network.
+        </p>
+      </section>
+    </main>
+
+    <!-- ===================================================================
+         PROJECTS VIEW — the device-local project list (works offline)
+    ==================================================================== -->
+    <main id="view-projects" data-view aria-labelledby="projects-title">
+      <div class="projects">
+        <header class="projects__head">
+          <span class="brand">
+            <span class="brand__mark" aria-hidden="true"></span>
+            <span class="brand__name">Studio <b>v2</b></span>
+          </span>
+          <span class="projects__user" id="projects-user" title="Signed in as" hidden></span>
+          <button class="icon-btn" id="projects-settings" aria-label="Settings">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-settings"></use></svg>
+          </button>
+          <button class="icon-btn" id="projects-logout" aria-label="Sign out">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-logout"></use></svg>
+          </button>
+        </header>
+
+        <div class="projects__intro">
+          <h1 id="projects-title" class="projects__title">Your projects</h1>
+          <p class="projects__sub">Each project lives on <b>this device</b> — its videos,
+            edits and exports never leave your phone.</p>
+        </div>
+
+        <div class="projects__create">
+          <label class="sr-only" for="project-name">New project name (optional)</label>
+          <input class="input" id="project-name" type="text" inputmode="text"
+                 placeholder="Project name (optional)"
+                 autocomplete="off" autocapitalize="sentences" spellcheck="false"
+                 maxlength="80" />
+          <button class="btn btn--primary" id="project-create" type="button">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-folder-plus"></use></svg>
+            <span>Create</span>
+          </button>
+        </div>
+
+        <div class="projects__list" id="projects-list" aria-live="polite"></div>
+
+        <div class="projects__empty" id="projects-empty" hidden>
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-film"></use></svg>
+          <b>No projects yet</b>
+          <p>Create one above, then add a video from your library to start cutting.</p>
+        </div>
+
+        <div class="storage" aria-label="Storage">
+          <div class="storage__row">
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-storage"></use></svg>
+            <span class="storage__text" id="quota-text">Checking storage…</span>
+          </div>
+          <div class="quota-bar" id="quota-bar" role="meter" aria-label="Storage used"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+            <div class="quota-bar__fill" id="quota-fill"></div>
+          </div>
+          <p class="persist-note" id="persist-note" hidden>
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-alert"></use></svg>
+            <span>This browser may clear Studio’s storage if the device runs low —
+              keep finished videos saved to Photos.</span>
+          </p>
+        </div>
+
+        <details class="caps">
+          <summary>
+            <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-phone"></use></svg>
+            Device capabilities
+            <svg class="icon caps__chev" aria-hidden="true"><use href="/static/assets/icons.svg#i-chevron-right"></use></svg>
+          </summary>
+          <dl class="caps__rows" id="caps-rows"></dl>
+        </details>
+      </div>
+    </main>
+
+    <!-- ===================================================================
+         EDITOR VIEW — editor.js (Step 5) mounts into #editor-mount from
+         app.js enterEditor(). The placeholder shows only while the editor
+         module is loading (or if it failed to load — app.js then surfaces
+         the error and routes back to projects).
+    ==================================================================== -->
+    <div id="view-editor" data-view>
+      <header class="editor-topbar">
+        <button class="icon-btn" id="editor-back" aria-label="Back to projects">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-back"></use></svg>
+        </button>
+        <span class="editor-topbar__name" id="editor-project-name">Project</span>
+        <button class="icon-btn" id="editor-settings" aria-label="Settings">
+          <svg class="icon" aria-hidden="true"><use href="/static/assets/icons.svg#i-settings"></use></svg>
+        </button>
+      </header>
+      <main class="editor-mount" id="editor-mount" aria-label="Editor">
+        <div class="editor-placeholder" id="editor-placeholder">
+          <span class="spinner" role="status" aria-label="Opening the editor"></span>
+          <p>Opening the editor…</p>
+        </div>
+      </main>
+    </div><!-- /#view-editor -->
+
+  </div><!-- /#app -->
+
+  <!-- delete-confirm dialog — populated by projects.js -->
+  <div class="confirm" id="confirm" data-open="false" hidden></div>
+
+  <!-- toasts -->
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ===================================================================
+       BOOT WATCHDOG (classic script, no imports — always runs)
+       If app.js (or any module it pulls in) fails to load, the module graph
+       aborts before any catch can run and the splash would stay up forever.
+       This inline guard lifts the splash to the login view with a visible
+       error so the user is never stranded on a blank screen.
+  ==================================================================== -->
+  <script>
+    (function () {
+      var WATCHDOG_MS = 8000;
+      window.__studio2Booted = window.__studio2Booted || false;
+      setTimeout(function () {
+        if (window.__studio2Booted) return;
+        var app = document.getElementById("app");
+        if (!app) return;
+        if (app.getAttribute("data-view") !== "loading") return;
+        app.setAttribute("data-view", "login");
+        var errEl = document.getElementById("login-error");
+        var errText = document.getElementById("login-error-text");
+        if (errText) {
+          errText.textContent =
+            "The app didn’t finish loading. Refresh the page — if it persists, restart Studio on the computer.";
+        }
+        if (errEl) errEl.setAttribute("data-show", "true");
+        try { console.error("[studio2] Boot watchdog fired: app.js did not signal boot within " + WATCHDOG_MS + "ms."); } catch (e) {}
+      }, WATCHDOG_MS);
+    })();
+  </script>
+
+  <script type="module" src="/static/app.js?v=12"></script>
+</body>
+</html>

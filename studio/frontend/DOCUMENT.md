@@ -27,16 +27,27 @@ Everything here is **replaced by the Frontend Engineer**.
 ## File structure
 ```
 frontend/
-├── index.html    # SPA shell: 4 views (loading/login/sessions/dashboard); modal hosts; update banner; stepper mount; ?v=11
-├── styles.css    # tokens, layout, responsive, motion (no framework); ?v=11
-├── app.js        # bootstrap + view orchestration: login → SESSIONS → dashboard; guide-state aggregation; version watch
+├── index.html    # SPA shell: 4 views (loading/login/sessions/dashboard); modal hosts; .banner-stack (update +
+│                 #   secure banners); stepper mount; ?v=16
+├── setup.html    # STANDALONE Secure Setup page (NEW, 2026-06-11) — served login-free at /setup on BOTH schemes;
+│                 #   no SPA boot; links styles.css?v=16 for tokens (inline fallback <style> degrades gracefully);
+│                 #   one tiny inline script fetches /api/tls/info and fills the live https URLs via textContent
+├── styles.css    # tokens, layout, responsive, motion (no framework); banner-stack + secure-banner + setup-page
+│                 #   sections; ?v=16
+├── app.js        # bootstrap + view orchestration: login → SESSIONS → dashboard; guide-state aggregation; version
+│                 #   watch + secure-address banner (both ride the same /api/me read); ASSET_VERSION "16";
+│                 #   loads diag.js FIRST (versioned), logs boot facts + banner/session events, gates diag on auth
+├── diag.js       # phone-side diagnostics (NEW, 2026-06-10): dlog() ring buffer → batched POST /api/client-log;
+│                 #   sendBeacon dying-tab tail; localStorage crash replay; window error/rejection capture;
+│                 #   singleton on window.__studioDiag (NEVER import it bare from a versioned module)
 ├── guide.js      # the "red thread" 4-step journey stepper (NEW, 2026-06-10) — render-only, state pushed by app.js
 ├── sessions.js   # the Sessions screen + post-login stale-cleanup modal + "How it works" onboarding card
 ├── api.js        # fetch wrapper (cookie, credentials:same-origin), SSE helpers, error normalization; session CRUD
 ├── chat.js       # chat view: send, render deltas, tool-call chips, ask_user card (roving tabindex), empty-state CTA, ready card
 ├── panel.js      # project panel: clip inventory, transcribe, humanized outputs + Advanced, next-step card (session-scoped)
 ├── preview.js    # preview player + Download anchor + Frame checks (collapsed) + verify-PNG lightbox
-├── upload.js     # chunked/RESUMABLE uploader: retry/backoff, client_id resume, Wake Lock, Resume button (slice lazily!)
+├── upload.js     # chunked/RESUMABLE uploader: retry/backoff, client_id resume, Wake Lock, Resume button (slice lazily!);
+│                 #   keep-screen-on notice now links /setup (new tab); fully diag-instrumented (up.* lifecycle events)
 ├── drawer.js     # responsive drawer/sheet + focus trap + scroll lock + revealUpload/revealTranscribe jumps
 ├── status.js     # system status pills + rows (/api/status) — plain-language labels
 ├── login.js      # login view
@@ -829,8 +840,372 @@ ancestors) at viewports 390/640/1280, ten fixed container widths, and a
 180→1240px sweep in 20px steps — ZERO overlaps; re-injecting the OLD css
 reproduced 18 overlaps (the checker is not vacuous).
 
+## Phone-side diagnostics — `diag.js` (2026-06-10, live-incident tooling)
+Built for the live incident where a phone upload stalled in TOTAL client
+silence (server saw init + chunk 0, then nothing; a retry from a new browser
+also "no progress"). Server logs cannot explain a silent phone — `diag.js`
+makes the phone's browser ship its own story to the backend's new
+`POST /api/client-log` (auth-gated; body `{events:[{t,level,msg,data?}…]}`;
+caps ≤64 KB body / ≤200 events / msg ≤500 chars / data ≤~2 KB → `{ok:true}`).
+
+### The logger (`diag.js`, NEW)
+- **`dlog(level, msg, data?)`** pushes `{t:Date.now(), level, msg, data}` into a
+  bounded ring buffer (≤300; a separate pending queue, also ≤300, tracks
+  undelivered events — oldest dropped when over). `msg` is a SHORT, STABLE,
+  greppable code ("up.chunk.err"); details ride in `data`.
+- **Every server cap is re-enforced client-side** so a batch can never trip a
+  413/400: level normalized to debug|info|warn|error, msg sliced to 500 chars,
+  `data` JSON-snapshotted and bounded to ~2 KB serialized (oversize degrades to
+  `{truncated:true, preview}`; circular/BigInt/function data degrade safely),
+  ≤20 events AND ≤56 KB per POST.
+- **Shipping:** fire-and-forget batches every ~5 s OR immediately when ≥20
+  events are pending; a backlog drains in successive ≤20-event batches. The
+  failure policy is BY CAUSE (P1 fix 2026-06-10 — see the dated section below):
+  a CONNECTIVITY failure (fetch TypeError — no HTTP response existed — or
+  `navigator.onLine === false`) re-queues the batch WITHOUT burning the retry,
+  so a dead network can never destroy events (only the ≤300 pending cap bounds
+  them, oldest dropped; the localStorage mirror keeps the tail regardless); a
+  SERVER rejection (an HTTP response arrived, non-ok, non-401, e.g. 4xx/5xx)
+  is re-queued ONCE, then dropped (no infinite loop on a server that refuses
+  us); a 401 re-queues WITHOUT burning the retry and flips the auth gate off
+  (events buffer until login). While the browser reports offline the shipper
+  PAUSES — a cheap `navigator.onLine` guard in the ship loop means ZERO POST
+  attempts and no spin — and the `online` event triggers an IMMEDIATE flush of
+  everything pending (sequential ≤20-event batches, FIFO order), so the offline
+  story arrives without a page reload. Diag **never throws, never blocks,
+  never recurses** on its own failures — every entry point is try/caught and
+  shipper failures are silent (no dlog-about-dlog).
+- **Auth gate:** shipping only runs while `setAuth(true)` — wired by `app.js`
+  at boot (`getMe`), on login success, on logout, and self-healing via the
+  5-minute version-watch `/api/me` read (covers mid-run session expiry).
+- **Dying-tab tail:** `pagehide` + `visibilitychange→hidden` ship the pending
+  tail via `navigator.sendBeacon` (Blob, `application/json`, same-origin cookie
+  rides along) — a suspended/killed phone tab still delivers its last moments.
+  The visibility/pagehide event is dlog'd FIRST so it is part of the beacon.
+- **Crash persistence:** the last ≤200 ring events mirror to localStorage
+  (`studio.diag.tail.v1`, throttled ~2 s; immediate on hide). On next boot any
+  leftover mirror is claimed exactly once (read + remove), queued at the FRONT
+  of pending (ships FIRST), each event tagged `data.replay:true` with its
+  ORIGINAL timestamp — a frozen tab's history reaches the server when the user
+  reopens Studio. Normal reloads replay too (duplicates are expected and
+  marked; server-side the replay flag distinguishes them).
+- **Global capture:** `window error` + `unhandledrejection` → `dlog("error",
+  "win.error"/"win.unhandledrejection", {message, stack ≤1200 chars, …})`;
+  `online`/`offline` and every `document.visibilityState` change are logged.
+- **SINGLETON — the one wiring rule:** the instance is published on
+  `window.__studioDiag`. `app.js` loads `diag.js` ONCE, dynamically and
+  VERSIONED (`?v=ASSET_VERSION`), as boot Phase 0 (before the feature modules,
+  so a Phase-1 load failure is itself captured). Feature modules must NOT
+  `import "./diag.js"` — a bare import from a `?v`-versioned module would
+  create a SECOND module instance (the documented api.js double-load trap).
+  Instead they use a 3-line shim reading `window.__studioDiag` (silent no-op
+  when diag is absent — see `upload.js`). Double-eval is also guarded inside
+  diag.js itself (an existing instance is reused; no duplicate listeners/timers).
+- **Privacy/XSS:** no credential fields, no cookie values (httpOnly anyway), no
+  tokens, no usernames in events (the server tags identity from the session);
+  `login.js` is NOT instrumented — app.js logs a bare-boolean `app.login.ok`
+  after success. Diag data is never rendered into the DOM by anyone (verified).
+
+### Instrumentation map (grep these msg codes in `studio/.runtime/logs/studio.log`)
+- **upload.js (`up.*` — the incident's heart):** `up.pick` (name/size/type/
+  lastModified/client_id), `up.validate.fail`, `up.init` (request) /
+  `up.init.ok` (upload_id, mode fresh|resumed — inferred from received>0 —
+  received count, total_chunks, chunk_size), `up.reconcile.ok/.err` (Resume's
+  GET /status result), `up.chunk.start/.ok/.err` (id, index, bytes, per-ATTEMPT
+  duration_ms, err code/status — one pair per attempt, so a stalled chunk shows
+  as a start with no finish), `up.retry` (tag init|chunk, attempt #, delay_ms,
+  reason) + `up.retry.exhausted` (logged centrally inside `withRetry`),
+  `up.resume.click`, `up.cancel`, `up.fail` (phase, code/status, resumable),
+  `up.complete.start` / `up.complete.ok` (whole-file duration_ms incl. retries/
+  resumes via ctx.startedAt, stored basename), `up.wakelock.ok/.released/.fail`
+  (with the error) / `up.wakelock.hint` (the "keep your screen on" fallback).
+- **app.js (`app.*`):** `app.boot` (ASSET_VERSION, userAgent ≤200 chars, screen
+  + viewport + dpr, online, visibility), `app.boot.error`, `app.login.ok`
+  (bare boolean), `app.session.open` (session_id), `app.banner.show` (transition-
+  guarded, server_v/page_v) / `app.banner.dismiss` / `app.banner.refresh` (the
+  reload's pagehide beacon ships it).
+- **diag.js itself:** `diag.replay` (count), `win.error`, `win.unhandledrejection`,
+  `net.online`/`net.offline`, `page.visibility`, `page.pagehide`.
+
+### Cache-bust
+`index.html` `?v=11 → ?v=12` (styles.css + app.js) and `app.js`
+`ASSET_VERSION "11" → "12"` in lockstep (versions the dynamic imports incl. the
+new `diag.js`); `util.js` import still UNversioned. styles.css is byte-unchanged
+this pass — the bump keeps the pair moving together per convention.
+
+### Verified (throwaway `%TEMP%` harness, deleted after; Playwright-Chromium)
+`diag.js`/`upload.js`/`app.js` pass `node --check` as ESM. A Node stub served
+this folder + a recording `POST /api/client-log` + a fake chunked upload API:
+boot ships `app.boot` (v "12", real UA/screen); 3 sub-threshold events arrived
+on the ~5 s timer tick (+4.3 s, not immediate); a 25-event burst flushed
+IMMEDIATELY as 20 + 5 (every batch across all runs ≤20 events); 400 events
+while signed out → ring/pending both bounded at 300, ZERO batches shipped, and
+`setAuth(true)` drained exactly 300 (15×20, oldest 100 dropped, order kept);
+`visibilitychange→hidden` shipped the tail via sendBeacon 2 ms after dispatch
+(application/json, visible in the network log, includes the visibility event
+itself) and wrote the 200-event mirror; reload replayed all 200 FIRST tagged
+`replay:true` (claimed once — not 400), then `diag.replay` + the new `app.boot`,
+and the real pagehide beacon from the dying page arrived too; a simulated
+3-chunk upload with an injected one-shot 503 on chunk 1 produced the COMPLETE
+zero-loss thread (pick → init → init.ok → chunk0 ok → chunk1 err 503 →
+up.retry 1/5 @1050 ms with reason → chunk1 ok → chunk2 ok → complete.ok
+1118 ms + stored name, wakelock ok/released bracketing) and the row finished
+"done"; hostile dlog inputs (circular, BigInt, function, 50 KB string, nullish,
+bad level) never threw and arrived capped (`truncated:true`, preview 1400,
+level→"info"); XSS sentinels logged through diag never appeared in
+`document.documentElement.innerHTML`.
+
+### Micro-fix (2026-06-10, post-QA): replayLeftover pending trim
+QA caught a wrong-direction splice in `diag.js` `replayLeftover()`: the
+post-replay trim used `pending.splice(pending.length - PENDING_MAX)`, which
+DELETES the last 300 entries (keeping `length−300`) instead of capping at 300.
+Fixed to `pending.splice(PENDING_MAX)` — keep the FIRST 300 (the FRONT, where
+replays were unshifted, so the crash-replay story survives the trim and ships
+first). Note this trim intentionally differs from the file's other trim sites
+(`dlog`, the retry re-queue, the ring), which `splice(0, length−MAX)` to keep
+the NEWEST: those protect a live stream; this one protects the replay-first
+contract. Unreachable today (replay runs at module eval with pending empty and
+replays ≤200 < 300) but corrected before it could bite. Cache-bust: `index.html`
+`?v=12 → ?v=13` (styles.css + app.js) and `app.js` `ASSET_VERSION "12" → "13"`
+in lockstep; `util.js` import still UNversioned. `node --check` re-passed for
+`diag.js` + `app.js`.
+
+### P1 fix (2026-06-10, post-tester): offline batches were DROPPED, not delivered
+Tester-confirmed live failure: while the network was down, the shipper's batch
+POSTs died (`ERR_INTERNET_DISCONNECTED`) and the once-then-drop policy counted
+every dead-network tick as a burned retry — 7 batches burned out in a row, so
+after reconnect the first batch carried only `net.online`, and the whole
+offline story (`up.chunk.err` / `up.retry` / `up.retry.exhausted` / `up.fail`)
+reached the server ONLY via the localStorage boot replay after a page reload.
+Real incident shape (phone drops Wi-Fi, reconnects, user never reloads): the
+critical evidence stayed invisible. Fix, entirely inside `flushNow()` + the
+`online` listener in `diag.js`:
+- **Failure classification by cause:** a fetch rejection (TypeError — no HTTP
+  response existed) OR `navigator.onLine === false` is a CONNECTIVITY failure →
+  the batch is re-queued WITHOUT setting `retried`. A dead network can never
+  drop events; the ≤300 pending cap is the only bound (oldest dropped — the
+  mirror still preserves the tail for boot replay). Once-then-drop now applies
+  ONLY when an HTTP response actually arrived non-ok and non-401 (4xx/5xx — a
+  server actively refusing us must not cause an infinite loop). The 401 branch
+  is byte-identical to before.
+- **Pause while offline:** the ship loop gained a `!netDown()` guard
+  (`navigator.onLine === false`, read LIVE on every use so a missed event can
+  never wedge shipping in a stale state) — while the browser KNOWS it is
+  offline there are ZERO POST attempts; the 5 s timer keeps ticking cheaply.
+  When `onLine` lies `true` on a dead link, the TypeError path above still
+  classifies correctly (the guard is an optimization, not the only defense).
+- **Flush on reconnect:** the `online` listener now calls `scheduleFlush()`
+  after logging `net.online` — pending drains immediately in sequential
+  ≤20-event batches, FIFO, so the offline story ships first and in order,
+  with `net.online` riding in the tail batch.
+All design rules preserved: never throws / never blocks / never recurses,
+401-gating unchanged, beacon path unchanged, every client-side cap unchanged.
+**Cache-bust:** `index.html` `?v=13 → ?v=14` (styles.css + app.js) and `app.js`
+`ASSET_VERSION "13" → "14"` in lockstep; `util.js` import still UNversioned;
+styles.css byte-unchanged (the bump keeps the pair moving together).
+**Verified (throwaway `%TEMP%` harness driving REAL Chromium via DevTools,
+deleted after; never in the repo):** `diag.js`/`app.js` re-pass `node --check`
+as ESM. Against a recording stub server serving the real `diag.js`:
+(1) the EXACT failed scenario — REAL CDP offline emulation mid-activity, 45
+events generated offline (+ `net.offline`) sat through 3+ shipper ticks with
+pending=46, ZERO dropped and ZERO network attempts (pause guard confirmed at
+the browser network log: the only `/api/client-log` request was the pre-offline
+baseline); flipping back online delivered the ENTIRE story within 1.5 s
+(event-driven — well under the 5 s tick) as sequential batches 20/20/7, in
+order, zero duplicates, NO reload. (2) the `navigator.onLine`-lies-true dead
+link (fetch TypeError, the tester's burnout case): 7 consecutive failed cycles
+kept all 25 events pending; restoring the network delivered all 25 in order
+(20+5), exactly once. (3) server-rejection discipline preserved: a
+400-returning server received the batch exactly TWICE (initial + the one
+retry), then it was dropped — no loop — and normal shipping resumed
+immediately after.
+
+### P1 fix (2026-06-10, late evening): hung-chunk stall → dead non-resumable row
+The diagnostic system's first live catch (twice tonight, log-confirmed): the
+phone's chunk-0 PUT was COMMITTED server-side (200 written) but the response
+never reached the page's JS — the fetch hung forever (no per-chunk timeout),
+and when a reload finally killed it the failure surfaced as a **raw
+`TypeError`** ("Load failed"), which `isTransient()` classified PERMANENT
+(`!(err instanceof ApiError)`) → **0 of 6 retries fired** (zero `up.retry`
+lines in the log) and `canResume()` said no → dead "failed" row. Separately,
+Wake Lock is secure-context-only, so on plain-HTTP iOS it does not exist
+(`up.wakelock.hint reason=unsupported`) and screen lock suspended attempt 2.
+Four fixes, frontend-only:
+- **`api.js` body-read guard (additive):** in `request()`, the post-fetch body
+  read (`res.json()`/`res.text()` on a 2xx) is now wrapped — any read failure
+  becomes the same transient `ApiError(0, "network")` the fetch guard produces;
+  AbortError passes through untouched. Streaming paths needed nothing new:
+  `streamPost`'s fetch/normalizeError/reader loop already convert non-abort
+  failures to ApiError, `normalizeError`'s own `res.json()` was already
+  try/caught, `raw:true` responses are exempt by design (un-read Response
+  handed to the caller). No call-site changes.
+- **`upload.js` reclassification:** non-ApiError errors are now TRANSIENT by
+  default (retry + Resume via the unchanged `canResume(isTransient(...))`
+  chain) — EXCEPT `AbortError`, which keeps short-circuiting so user-cancel
+  never burns a retry. Defense-in-depth behind the api.js guard.
+- **`upload.js` per-chunk stall watchdog (the load-bearing fix):** retries only
+  fire on a THROWN error, so a silently hung PUT defeated the whole v14
+  machinery. Each chunk ATTEMPT now arms a timer — `chunkTimeoutMs(bytes)` =
+  max(90s floor, bytes/128 KiB/s + 30s grace) ⇒ 94s for an 8 MiB chunk
+  (deliberately biased EARLY: a premature abort is a cheap idempotent re-PUT;
+  a late one is minutes of silent hang). On expiry it aborts that attempt's
+  OWN AbortController (the run/cancel signal is relayed in), emits
+  `up.chunk.timeout {id, i, ms}`, and ONLY a watchdog-induced AbortError
+  (`timedOut && !ctx.aborted && name==="AbortError"`) is rewritten to transient
+  `ApiError(0,"timeout")` → normal backoff retries → committed chunk re-PUTs
+  to an instant 200. Timer cleared in `finally` on every settle (no leaks, no
+  post-completion firing); user-cancel aborts keep their AbortError identity →
+  the existing post-cancel silence is byte-identical.
+- **Visible keep-screen-on notice:** the previously feature-gate-only hint is
+  now driven by ACTUAL protection state — shown while uploads are active AND
+  no wake lock is held (API absent — iOS/plain-HTTP — OR acquire denied, via a
+  new `wakeLock.setOnChange` subscription + `held()`/`failed()`), with plain
+  copy: "Keep the screen on and stay in this tab until the upload finishes."
+  Static text on the existing `.upload-hint` tokens (styles.css untouched),
+  sits directly above the progress rows, clears when uploads settle or a lock
+  lands. `up.wakelock.hint` now reports reason `unsupported` | `acquire_failed`.
+**Cache-bust:** `index.html` `?v=14 → ?v=15` (styles.css + app.js) and `app.js`
+`ASSET_VERSION "14" → "15"` in lockstep; `util.js` import still UNversioned;
+styles.css byte-unchanged (the bump keeps the pair moving together). Remember
+"shipped ≠ deployed": restart the server so v15 is actually served.
+**Verified (throwaway `%TEMP%` harness + stub server driving REAL Chromium via
+Playwright, deleted after; never in the repo):** `api.js`/`upload.js`/`app.js`
+pass `node --check` as ESM. Against a stub that serves THESE files and scripts
+the failure shapes: (1) THE INCIDENT REPRO — chunk accepted + committed,
+response never sent → `up.chunk.timeout` → `up.chunk.err code=timeout` →
+`up.retry` (the line the live log had zero of) → idempotent re-PUT 200 →
+`up.complete.ok`, row "Uploaded" — run BOTH with a compressed clock (constants
+rewritten only in the served copy) and once at FULL FIDELITY (byte-exact files,
+real 90s watchdog). (2) torn body after a 200 (partial JSON + socket destroy) →
+`ApiError(0,"network")` (not a raw TypeError) → retry → complete. (3) cancel
+during a watchdog-armed stalled chunk → "Cancelled.", clean AbortError (NOT
+rewritten to timeout), DELETE after the run settled, NO timeout/retry events in
+the 12s after (timer cleared). (4) wake-lock-absent emulation → notice visible
+with the exact copy during a normal 3-chunk upload, gone on completion,
+`reason=unsupported` emitted; wake-lock-working runs showed NO notice.
+(5) Resume unregressed (complete→500 → Resume → `/status` reconcile →
+idempotent complete 200) and offline→online cycle unregressed (init retries
+burned `code=network` while offline, completed on reconnect).
+
+## Secure Studio onboarding UX — HTTPS on the LAN (2026-06-11)
+The frontend half of the "Secure Studio" feature (plan
+`PM/plan-2026-06-11-https.md`): the backend now serves the app on BOTH
+`http://<ip>:8420/` and `https://<ip>:8443/` with an app-generated local CA,
+because iOS only grants the Screen Wake Lock API in a secure context — over
+plain http, phone uploads die when the screen locks. This pass builds the
+path that walks a NON-TECHNICAL household member from the http origin to the
+trusted https one.
+
+- **`setup.html` (NEW) — the standalone Secure Setup page.** Served login-free
+  at `/setup` on both schemes (backend `FileResponse`, no-cache). Deliberately
+  NOT part of the SPA: no module graph, no boot, no auth — it must work on a
+  phone that has never signed in. It links `styles.css?v=16` purely for the
+  design tokens (Space Grotesk/Public Sans, the warm near-black ground,
+  orange accent) and carries a tiny inline `<style>` fallback BEFORE the link
+  (equal specificity → the real stylesheet wins when present) so a failed CSS
+  fetch still yields a readable dark page with native `<ol>` numbering.
+  Content, phone-first at 390px (no horizontal scroll; every control ≥44px):
+  - Title + promise ("one-time setup… upload with the screen allowed to
+    lock"), plus "do this once on each phone or computer".
+  - An iPhone "use Safari" callout (the Camera-app QR scan can land in a
+    browser that can't install configuration profiles).
+  - Four steps as cards in an `<ol role="list">` (explicit "Step N" eyebrows
+    carry the numbering under `list-style:none`; `role=list` keeps Safari/
+    VoiceOver list semantics): 1) big full-width Download button → `/ca.crt`
+    (NO `download` attribute — the backend serves it inline so iOS opens the
+    profile flow); 2) install path chips (Settings → Profile Downloaded →
+    Install); 3) **THE COMMONLY-MISSED STEP, visually dominant** — 2px accent
+    border + accent-glow gradient + warning icon + larger type/padding +
+    shadow: Settings → General → About → **Certificate Trust Settings** →
+    toggle ON for "video-use Studio CA…", with the plain warning "Skipping
+    this step means the secure address still shows a warning."; 4) the live
+    secure addresses.
+  - Collapsed `<details class="setup-more">` sections: Android (Chrome),
+    Windows desktop, and Troubleshooting (warning → you missed step 3; can't
+    connect → run `open-firewall.ps1` once as admin; old address says "not
+    secure" → expected, the http address stays as-is).
+  - **The page's only script** (inline, classic, ~40 lines) fetches
+    `GET /api/tls/info` (public, never-5xx contract) and fills `https_url` +
+    `host_local_url` as tappable links — **textContent ONLY**, and `href` is
+    assigned only after an explicit `https://` scheme check (defense in
+    depth; the value comes from our own server). The `.local` link carries
+    the "bookmark this one — it survives address changes" note. The trouble
+    callout is TWO-STATE (2026-06-11 QA P2 fix — a transient blip must not
+    overclaim that TLS is off): an EXPLICIT `enabled:false` from a successful
+    response shows "Secure mode isn't on right now. Restart the Studio server
+    on the computer, then reload this page." AND de-arms the download CTA
+    (href removed + `aria-disabled` + faded) since `/ca.crt` would 404; a
+    fetch failure (network error / non-OK) shows the softer "Couldn't reach
+    the Studio server just now. Check you're on the home Wi-Fi and reload
+    this page." and leaves the download armed. ONLY explicit `enabled:false`
+    ever de-arms. The enabled-but-no-usable-URLs shape failure shares the
+    soft state (armed, reload advice). Copy is injected via `textContent`
+    into `#tls-state-lead`/`#tls-state-rest`; the step-4 pending line splits
+    the same way ("…once secure mode is on." vs "…after a reload.").
+- **`#secure-banner` (`index.html` + `app.js`) — the in-app nudge.** Mirrors
+  the `#update-banner` pattern (same visual recipe, same invisible
+  `::after` ≥44px hit-areas). Shown ONLY when `!window.isSecureContext` AND
+  `/api/me` reports a non-null `secure_url` — i.e. NEVER on the https origin
+  and NEVER while TLS is off. Copy: "Uploads currently need the screen kept
+  on. Set up the secure address for hands-off uploads — a one-time, 2-minute
+  setup." with a "Set up" link (→ `/setup`, `target=_blank rel=noopener` so
+  it can't kill an in-flight upload in this tab) and a dismiss. **Dismissal
+  is gently persistent:** localStorage key
+  **`studio.secureBanner.dismissedAt`** (ms-epoch string); the banner stays
+  away for 7 days, then becomes eligible again. Storage failures (private
+  mode) fail open to a tab-lifetime dismissal. Visibility re-evaluates on
+  every `checkAssetVersion()` tick — the secure banner rides the SAME
+  `/api/me` raw read as the update banner (boot + 5-min visible-tab poll +
+  visibilitychange), so no new polling and no `api.js` change (`getMe()`'s
+  mapped shape is untouched; the raw `apiGet` payload carries `secure_url`).
+  It also HIDES itself if `secure_url` goes null mid-run.
+- **Banner coexistence (`.banner-stack`):** both banners can be due at once
+  (e.g. a deploy while still on http). They now live in a fixed top-center
+  flex COLUMN (`.banner-stack`, index.html) — the fixed positioning moved
+  from `.update-banner` to the stack (a lone banner renders pixel-identical
+  to before), heights stay content-driven so wrapped text at 390px can't
+  overlap, and the stack itself is `pointer-events:none` (children re-enable)
+  so the usually-empty fixed region never blocks the topbar.
+- **`upload.js` keep-screen-on notice:** gains the inline escape hatch — 
+  "…or **set up the secure address** to make this automatic" (anchor to
+  `/setup`, `target=_blank rel=noopener` + an "(opens in a new tab)"
+  aria-label, built from text nodes via `el()` — XSS discipline unchanged).
+  On the https origin Wake Lock works, so the notice (and the link) simply
+  never appears there.
+- **`styles.css`:** existing tokens ONLY. New sections: `.banner-stack` +
+  shared `.update-banner,.secure-banner` rules (the refactor above), the
+  `.upload-hint__link` accent, and the `setup-*` family (page scroll
+  override `body.setup-page` — the app shell sets `body{overflow:hidden}`,
+  the setup page must scroll; step cards; the dominant `--critical` card;
+  path chips; break-all URL links; `details` summaries ≥44px; reduced-motion
+  respected on every new transition/animation).
+**Cache-bust:** `index.html` `?v=15 → ?v=16` (styles.css + app.js) and
+`app.js` `ASSET_VERSION "15" → "16"` in lockstep (setup.html links
+styles.css?v=16 too); `util.js` import still UNversioned. Frontend-only — no
+server restart needed for these files; the backend half (the /setup route,
+/ca.crt, /api/tls/info, /api/me secure_url) ships separately and DOES need
+the restart.
+**Verified (throwaway `%TEMP%` stub server + real Chromium via Playwright,
+deleted after; never in the repo):** `app.js`/`upload.js` pass `node --check`
+as ESM and setup.html's extracted inline script as a classic script. Against
+stubs of the §5 contract on a NON-localhost LAN-IP origin (a genuine
+insecure context — localhost is always secure): setup.html at 390px/1440px —
+URLs filled via textContent, zero h-scroll, all tap targets ≥44px, step 3
+measurably dominant (2px accent border, +padding, +type, shadow vs 1px
+plain); no-CSS + tls-info-404 degradation readable (dark fallback, native
+list numbers, friendly off-state, download stays live); explicit
+`enabled:false` de-arms the download. Banner matrix: insecure+url → shows;
+dismiss → hidden + persists across reload; timestamp faked to 8 days →
+re-shows; `http://localhost` (secure ctx) → never; null `secure_url` →
+never. Both banners forced together at 390px → stacked with an 8px gap, no
+overlap, all four controls report 44px ::after hit areas. `initUpload`
+mounted against the real module → notice contains the `/setup` anchor
+(new-tab, noopener, text-node-only). Zero unexpected console errors.
+
 ## How it connects
 Pure consumer of `/api/*` per `API_CONTRACT.md` (now per-user sessions). Holds no
 secret of any kind — authentication is the server-managed httpOnly
 `studio_session` cookie, and the backend scopes every session call to that
-cookie's user. Do not introduce a build step.
+cookie's user. Do not introduce a build step. `setup.html` is the one
+deliberate exception to the SPA shape: a standalone, login-free document
+(served at `/setup`) whose only API touch is the public `GET /api/tls/info`.

@@ -32,16 +32,19 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 
 from . import net, settings
+from .core import applog
 from .core import sessions as sessions_store
 from .core import uploads as uploads_store
 from .routers import (
     auth,
     chat,
+    client_log,
     files,
     inventory,
     outputs,
     sessions,
     status,
+    tls,
     transcribe,
     transcripts,
     upload,
@@ -353,6 +356,47 @@ def _migrate_v2() -> None:
         logger.error("migrate_v2 failed (will retry next boot): %s", exc)
 
 
+class _EffectiveBindLogger:
+    """Pure-ASGI middleware that logs the EFFECTIVE local bind exactly once.
+
+    The lifespan "startup" facts line can only report the CONFIGURED
+    host/port from settings — if uvicorn was launched with explicit
+    ``--host``/``--port`` flags those win and the configured values lie
+    (observed: port=8420 logged for instances really bound to :8425/:8433).
+    The ASGI ``scope["server"]`` two-tuple on an http request IS ground truth:
+    uvicorn fills it from the accepted socket's local address (``sockname``),
+    so the port is the real bound port and the host is the local interface
+    address the connection actually arrived on (for a 0.0.0.0 bind this shows
+    the specific interface, e.g. 127.0.0.1 or the LAN IP — still honest).
+
+    One log line on the first http request, then pure pass-through (a single
+    cheap bool check per request). Zero-risk by construction: the log attempt
+    is wrapped so no scope shape (unix sockets carry ``(path, None)``, a
+    missing key carries ``None``) can ever break request handling. No await
+    between the flag check and set, so the asyncio event loop makes the
+    once-guard race-free within a worker.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self._logged = False
+
+    async def __call__(self, scope, receive, send) -> None:
+        if not self._logged and scope.get("type") == "http":
+            self._logged = True
+            try:
+                server = scope.get("server") or (None, None)
+                logger.info(
+                    "effective bind host=%s port=%s (from first request's ASGI "
+                    "scope; configured values may differ if uvicorn flags "
+                    "overrode settings)",
+                    server[0], server[1],
+                )
+            except Exception:  # noqa: BLE001 - logging must never break a request
+                pass
+        await self.app(scope, receive, send)
+
+
 class _RevalidatingStaticFiles(StaticFiles):
     """StaticFiles that tells the browser to always revalidate before reusing a
     cached asset.
@@ -381,6 +425,11 @@ class _RevalidatingStaticFiles(StaticFiles):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # File logging FIRST (idempotent — create_app already initialized it; this
+    # is the belt-and-suspenders for exotic entrypoints) so everything below —
+    # migration, GC, sweeps, the banner fallback — lands in the rotating log.
+    applog.init_logging()
+
     # Ensure runtime dirs exist and the session secret is initialized (so cookies
     # work across restarts) before serving.
     settings.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -431,6 +480,30 @@ async def lifespan(app: FastAPI):
     # reaches /api/me without a backend restart.
     logger.info("frontend asset_version: %s", auth.asset_version() or "unknown")
 
+    # Structured startup facts for the file log (one greppable line answering
+    # "what exactly was running?": code version, served frontend version, the
+    # CONFIGURED bind host/port from settings, the resolved LAN IP, and where
+    # the log lives). The keys say "configured_" because settings are all this
+    # process can cheaply know at lifespan time: when uvicorn is launched with
+    # explicit --host/--port flags those win over settings and this line would
+    # otherwise lie (it once claimed port=8420 for instances really bound to
+    # :8425/:8433 — actively misleading during multi-instance debugging). The
+    # banner has the same limitation. The EFFECTIVE bind is logged once by
+    # _EffectiveBindLogger on the first request. Best-effort.
+    try:
+        logger.info(
+            "startup version=%s asset_version=%s configured_host=%s "
+            "configured_port=%s lan_ip=%s log_file=%s",
+            settings.VERSION,
+            auth.asset_version() or "unknown",
+            settings.HOST,
+            settings.PORT,
+            net.lan_ip(),
+            applog.log_file_path() or "unavailable",
+        )
+    except Exception:  # noqa: BLE001 - a startup log line must never block boot
+        pass
+
     # Print the startup banner (URLs, credentials, QR, firewall hint). This is
     # the ONLY place a generated password is surfaced — so it MUST reach stdout
     # even on a non-UTF-8 console (redirected log, Windows service, cp1252 Docker
@@ -458,6 +531,13 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Rotating file logging BEFORE anything else can log. create_app() runs at
+    # module import — i.e. after uvicorn configured its console logging but
+    # before any request or lifespan logic — so every later line (incl. the
+    # uvicorn.access/uvicorn.error streams) also lands in .runtime/logs/.
+    # Idempotent + best-effort: a logging failure never breaks the app.
+    applog.init_logging()
+
     app = FastAPI(
         title="video-use Studio",
         version=settings.VERSION,
@@ -466,6 +546,11 @@ def create_app() -> FastAPI:
         openapi_url=None,  # also hide the unauthenticated /openapi.json schema
         lifespan=lifespan,
     )
+
+    # One-shot effective-bind logging (see _EffectiveBindLogger): the lifespan
+    # "startup" line can only know the CONFIGURED host/port; this logs the REAL
+    # one from the first request's ASGI scope.
+    app.add_middleware(_EffectiveBindLogger)
 
     # --- API routers (each gates itself with require_session except auth) ---
     app.include_router(auth.router)         # /api/login, /api/logout, /api/me (public)
@@ -478,6 +563,8 @@ def create_app() -> FastAPI:
     app.include_router(files.router)        # /api/file
     app.include_router(outputs.router)      # /api/outputs
     app.include_router(upload.router)       # /api/upload/*
+    app.include_router(client_log.router)   # /api/client-log (phone diagnostics)
+    app.include_router(tls.router)          # /ca.crt, /setup, /api/tls/info (public)
 
     # --- SPA shell + static assets (ungated) -------------------------------
     @app.get("/")

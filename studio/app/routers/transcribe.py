@@ -19,6 +19,7 @@ the session's stale clock.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from typing import Any, Deque
 
@@ -32,6 +33,12 @@ from ..helpers_wrap import transcribe as transcribe_wrap
 from . import deps
 
 router = APIRouter(prefix="/api", tags=["transcribe"])
+
+# Job correlation diagnostics (rotating file log; see core/applog.py). The
+# generic start/end (with outcome + duration) is logged by core/jobs.py at the
+# Job chokepoint; this router adds ONE context line tying the job_id to the
+# session + user + file counts. Observation only.
+_log = logging.getLogger("studio.job")
 
 # Per-job SSE event buffers (job_id -> deque of (event, data)). The worker
 # appends; the SSE endpoint drains. Bounded so a never-consumed buffer can't grow
@@ -100,12 +107,20 @@ async def start_transcribe(
 
     job, running = jobs.registry.create("transcribe", "trx")
     if job is None:
+        _log.info(
+            "transcribe reject outcome=job_in_flight session_id=%s user=%s running=%s",
+            session_id, user, running.job_id,
+        )
         raise deps.http_error(
             409, "job_in_flight", "a transcription job is already running",
             detail={"job_id": running.job_id},
         )
 
     pre = transcribe_wrap.plan(folder, body.files)
+    _log.info(
+        "transcribe job_id=%s session_id=%s user=%s files=%s already_cached=%s",
+        job.job_id, session_id, user, len(pre["files"]), len(pre["already_cached"]),
+    )
     buf: Deque[tuple[str, dict]] = deque(maxlen=2000)
     _buffers[job.job_id] = buf
 

@@ -31,7 +31,27 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-# -------- Frame extraction ---------------------------------------------------
+# -------- Duration probe + frame extraction ----------------------------------
+
+
+def probe_duration(video: Path) -> float | None:
+    """Return the container duration in seconds via ffprobe, or None if unknown."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return None
 
 
 def extract_frames(video: Path, start: float, end: float, n: int, dest_dir: Path) -> list[Path]:
@@ -57,7 +77,16 @@ def extract_frames(video: Path, start: float, end: float, n: int, dest_dir: Path
             "-vf", "scale=320:-2",
             str(out),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            tail = "\n".join((proc.stderr or "").strip().splitlines()[-5:])
+            raise RuntimeError(
+                f"ffmpeg failed extracting frame {i} at {t:.3f}s "
+                f"(exit {proc.returncode}):\n{tail}"
+            )
         paths.append(out)
     return paths
 
@@ -118,7 +147,7 @@ def compute_envelope(video: Path, start: float, end: float, samples: int = 2000)
 def words_in_range(transcript_path: Path, start: float, end: float) -> list[dict]:
     if not transcript_path.exists():
         return []
-    data = json.loads(transcript_path.read_text())
+    data = json.loads(transcript_path.read_text(encoding="utf-8"))
     out: list[dict] = []
     for w in data.get("words", []):
         t = w.get("type", "word")
@@ -365,6 +394,22 @@ def main() -> None:
     if args.end <= args.start:
         sys.exit("end must be > start")
 
+    # Clamp the range to the clip: a timestamp at/past EOF makes ffmpeg fail
+    # (no frame to extract). The last decodable frame sits one frame interval
+    # BEFORE the container duration, so clamp just inside EOF (0.1s covers
+    # sources down to 10 fps). If the probe fails, proceed unclamped as before.
+    duration = probe_duration(video)
+    if duration is not None:
+        if args.start >= duration:
+            sys.exit(
+                f"start {args.start:.2f}s is at/past the end of the clip "
+                f"(duration {duration:.2f}s)"
+            )
+        safe_end = max(args.start, duration - 0.1)
+        if args.end > safe_end:
+            print(f"clamping end {args.end:.2f}s -> {safe_end:.2f}s (clip duration {duration:.2f}s)")
+            args.end = safe_end
+
     # Auto-resolve transcript if not given
     transcript = args.transcript
     if transcript is None:
@@ -378,14 +423,19 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{video.stem}_{args.start:.2f}-{args.end:.2f}.png"
 
-    render_timeline(
-        video=video,
-        start=args.start,
-        end=args.end,
-        out_path=out_path,
-        n_frames=args.n_frames,
-        transcript=transcript,
-    )
+    try:
+        render_timeline(
+            video=video,
+            start=args.start,
+            end=args.end,
+            out_path=out_path,
+            n_frames=args.n_frames,
+            transcript=transcript,
+        )
+    except RuntimeError as exc:
+        # ffmpeg failure (see extract_frames): exit with the concise message +
+        # stderr tail instead of an uncaught traceback.
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":

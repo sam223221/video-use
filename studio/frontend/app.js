@@ -39,7 +39,7 @@ import { byId, toast } from "./util.js";
    already bumps app.js?v=N), but its dynamic import() URLs carry no query of their
    own, so a returning client could keep running STALE cached modules after a
    deploy. Bump this in lockstep with the index.html ?v= to close that gap. */
-const ASSET_VERSION = "11";
+const ASSET_VERSION = "16";
 
 const app = byId("app");
 
@@ -48,12 +48,29 @@ function markBooted() {
   try { window.__studioBooted = true; } catch { /* ignore */ }
 }
 
+/* ---- diagnostics (diag.js) --------------------------------------------------
+   Loaded FIRST in boot() (versioned, like every feature module) so module-load
+   failures and the boot facts are captured and shipped to /api/client-log.
+   The app NEVER depends on it: both helpers are silent no-ops while diag is
+   absent or broken. `syncDiagAuth` gates shipping on the login state — diag
+   buffers events until the session cookie can authenticate the POST. */
+let diag = null;   // resolved diag.js module (or null — diagnostics optional)
+
+function dlog(level, msg, data) {
+  try { if (diag && typeof diag.dlog === "function") diag.dlog(level, msg, data); } catch { /* ignore */ }
+}
+
+function syncDiagAuth(authed) {
+  try { if (diag && typeof diag.setAuth === "function") diag.setAuth(!!authed); } catch { /* ignore */ }
+}
+
 function setView(view) { if (app) app.dataset.view = view; }
 
 /* Reveal the login view and surface a human-readable error in its existing
    error slot — used when boot can't complete (module load failure, etc.). */
 function showBootError(message) {
   markBooted();
+  dlog("error", "app.boot.error", { message: String(message || "").slice(0, 300) });
   setView("login");
   const errEl = byId("login-error");
   const errText = byId("login-error-text");
@@ -223,6 +240,7 @@ function buildDashboard() {
   // logout
   byId("logout-btn").addEventListener("click", async () => {
     await logout();
+    syncDiagAuth(false);   // cookie cleared — diag buffers until the next login
     activeSession = null;
     showLogin(true);
     toast("Signed out.", "info");
@@ -262,6 +280,7 @@ function showSessions() {
     if (logoutBtn) {
       logoutBtn.addEventListener("click", async () => {
         await mods.logout();
+        syncDiagAuth(false);   // cookie cleared — diag buffers until the next login
         activeSession = null;
         me = { authenticated: false, username: null, staleSessions: 0 };
         showLogin(true);
@@ -278,6 +297,7 @@ function showSessions() {
 /* Enter the editor for a freshly-opened session. */
 async function enterDashboard(session) {
   activeSession = session;
+  dlog("info", "app.session.open", { session_id: session && session.id });
   setView("dashboard");
   const d = buildDashboard();
   // fresh session → reset the journey stepper before async loads repopulate it
@@ -313,6 +333,10 @@ function showLogin(reset) {
       onSuccess: (info) => {
         if (info && info.username) me.username = info.username;
         me.authenticated = true;
+        // Deliberately a bare boolean event — never the username or any
+        // credential field; the server logs identity from the session itself.
+        syncDiagAuth(true);
+        dlog("info", "app.login.ok");
         // Re-read /api/me so the stale-session hint is current right after login,
         // then land on the sessions screen (which pops the cleanup modal itself
         // from the authoritative /api/sessions payload).
@@ -329,6 +353,7 @@ function showLogin(reset) {
 async function refreshMe() {
   try {
     me = await mods.getMe();
+    syncDiagAuth(me.authenticated);
   } catch { /* keep prior snapshot; sessions screen will surface load failures */ }
   return me;
 }
@@ -352,8 +377,13 @@ function initUpdateBanner() {
   const refreshBtn = byId("update-refresh");
   const dismissBtn = byId("update-dismiss");
   if (!banner || !refreshBtn || !dismissBtn) return;
-  refreshBtn.addEventListener("click", () => { try { location.reload(); } catch { /* ignore */ } });
+  refreshBtn.addEventListener("click", () => {
+    // The reload tears the tab down — diag's pagehide beacon ships this event.
+    dlog("info", "app.banner.refresh", { v: bannerShownFor });
+    try { location.reload(); } catch { /* ignore */ }
+  });
   dismissBtn.addEventListener("click", () => {
+    dlog("info", "app.banner.dismiss", { v: bannerShownFor });
     bannerDismissedFor = bannerShownFor;
     banner.hidden = true;
   });
@@ -368,8 +398,12 @@ function maybeShowUpdateBanner(serverVersion) {
   if (v === bannerDismissedFor) return;          // user already dismissed this one
   const banner = byId("update-banner");
   if (!banner) return;
+  // Log only the SHOW transition — the poll re-runs this every cycle while the
+  // banner stays up, and re-logging each tick would just be noise.
+  const firstShow = !(bannerShownFor === v && banner.hidden === false);
   bannerShownFor = v;
   banner.hidden = false;
+  if (firstShow) dlog("info", "app.banner.show", { server_v: v, page_v: ASSET_VERSION });
 }
 
 async function checkAssetVersion() {
@@ -377,7 +411,15 @@ async function checkAssetVersion() {
   if (document.visibilityState === "hidden") return;   // don't poll a hidden tab
   try {
     const r = await mods.apiGet("/api/me");
+    // Self-healing diag auth signal: this is the only periodic /api/me read,
+    // so a mid-run session expiry (or a re-login in another tab) re-gates
+    // diag shipping without any extra polling.
+    if (r && typeof r.authenticated === "boolean") syncDiagAuth(r.authenticated);
     maybeShowUpdateBanner(r && r.asset_version);
+    // The same raw payload carries `secure_url` (the HTTPS origin, when TLS is
+    // up) — drive the secure-address onboarding banner off this read too, so
+    // boot + the 5-minute poll + visibilitychange all keep it current.
+    maybeShowSecureBanner(r ? r.secure_url : null);
   } catch { /* network blip — next tick will retry */ }
 }
 
@@ -389,6 +431,68 @@ function startVersionWatch() {
   });
 }
 
+/* ---- secure-address onboarding banner (#secure-banner) ----------------------
+   The Wake Lock API needs a secure context, so on the plain-http origin phone
+   uploads only survive while the screen is kept on by hand. When the server
+   reports a secure_url on /api/me AND this page is NOT a secure context, a
+   slim banner nudges the user to the one-time /setup flow (CA trust → https).
+   Hard gates — the banner can NEVER appear when:
+     • window.isSecureContext is true (already on the https origin), or
+     • secure_url is null/absent (TLS off or an older backend).
+   Dismissal is gently persistent: the dismiss tap stores a timestamp in
+   localStorage under SECURE_DISMISS_KEY ("studio.secureBanner.dismissedAt",
+   ms-since-epoch as a string) and the banner stays away for 7 days
+   (SECURE_RESHOW_MS), then becomes eligible again — hands-off uploads matter
+   enough to re-ask occasionally, but never to nag every visit. Visibility is
+   re-evaluated on every checkAssetVersion() tick (boot + 5-min poll +
+   visibilitychange), which also HIDES a showing banner if secure_url goes
+   null mid-run (TLS turned off). Storage failures (private mode) fail open:
+   the banner shows, and dismissal lasts for the tab's lifetime only. */
+const SECURE_DISMISS_KEY = "studio.secureBanner.dismissedAt";
+const SECURE_RESHOW_MS = 7 * 24 * 60 * 60 * 1000;   // re-show after 7 days
+let secureDismissedThisRun = false;   // private-mode fallback (no localStorage)
+
+function secureBannerDismissed() {
+  if (secureDismissedThisRun) return true;
+  try {
+    const raw = localStorage.getItem(SECURE_DISMISS_KEY);
+    if (!raw) return false;
+    const ts = parseInt(raw, 10);
+    if (!Number.isFinite(ts)) return false;            // garbage → eligible
+    return Date.now() - ts < SECURE_RESHOW_MS;         // expired → eligible again
+  } catch { return false; }
+}
+
+function initSecureBanner() {
+  const banner = byId("secure-banner");
+  const dismissBtn = byId("secure-dismiss");
+  const setupLink = byId("secure-setup-link");
+  if (!banner || !dismissBtn) return;
+  if (setupLink) {
+    setupLink.addEventListener("click", () => { dlog("info", "app.securebanner.setup"); });
+  }
+  dismissBtn.addEventListener("click", () => {
+    secureDismissedThisRun = true;
+    try { localStorage.setItem(SECURE_DISMISS_KEY, String(Date.now())); } catch { /* tab-lifetime dismissal only */ }
+    banner.hidden = true;
+    dlog("info", "app.securebanner.dismiss");
+  });
+}
+
+function maybeShowSecureBanner(secureUrl) {
+  const banner = byId("secure-banner");
+  if (!banner) return;
+  const eligible =
+    !window.isSecureContext &&
+    typeof secureUrl === "string" && secureUrl.length > 0 &&
+    !secureBannerDismissed();
+  if (!eligible) { banner.hidden = true; return; }
+  // Log only the SHOW transition (the poll re-runs this every cycle).
+  const firstShow = banner.hidden;
+  banner.hidden = false;
+  if (firstShow) dlog("info", "app.securebanner.show");
+}
+
 /* ---- boot ----------------------------------------------------------------- */
 let booted = false;
 async function boot() {
@@ -398,6 +502,26 @@ async function boot() {
   // Reaching boot() already proves app.js (and the whole module graph that
   // statically imports it) loaded, so disarm the index.html watchdog up front.
   markBooted();
+
+  // Phase 0 — diagnostics (best-effort; the app never depends on it). Loaded
+  // BEFORE the feature modules so a Phase-1 load failure is itself captured,
+  // and versioned like every other dynamic import. diag replays any leftover
+  // events a previous (frozen/killed) run persisted, then this run's boot
+  // facts open the new thread: version, device, viewport, connectivity.
+  try {
+    diag = await import("./diag.js?v=" + ASSET_VERSION);
+    dlog("info", "app.boot", {
+      v: ASSET_VERSION,
+      ua: String(navigator.userAgent || "").slice(0, 200),
+      screen: (typeof screen !== "undefined" && screen) ? `${screen.width}x${screen.height}` : "",
+      viewport: `${window.innerWidth}x${window.innerHeight}`,
+      dpr: window.devicePixelRatio || 1,
+      online: typeof navigator.onLine === "boolean" ? navigator.onLine : null,
+      visibility: document.visibilityState,
+    });
+  } catch (err) {
+    console.error("[studio] diagnostics unavailable (continuing without):", err);
+  }
 
   // Phase 1 — load the feature modules. A failure here (e.g. a 404 on any
   // /static/*.js) must NOT leave a blank screen: reveal login + a visible error.
@@ -413,6 +537,7 @@ async function boot() {
   // login view rather than a frozen splash.
   try {
     me = await mods.getMe();
+    syncDiagAuth(me.authenticated);
     if (me.authenticated) {
       showSessions();
     } else {
@@ -424,8 +549,10 @@ async function boot() {
     toast("Cannot reach the Studio server. Is it running?", "bad", 6000);
   }
 
-  // Phase 3 — stale-frontend watch (boot check + light periodic re-check).
+  // Phase 3 — stale-frontend + secure-address watch (boot check + light
+  // periodic re-check; both banners ride the same /api/me read).
   initUpdateBanner();
+  initSecureBanner();
   startVersionWatch();
 }
 

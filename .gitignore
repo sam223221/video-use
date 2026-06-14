@@ -67,3 +67,6 @@ PM/
 .playwright-mcp/
 test-server.log
 *-test*.log
+studio2/relay/.runtime/
+studio2/relay/config.toml
+studio2/relay/.venv/

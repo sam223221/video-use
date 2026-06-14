@@ -74,6 +74,12 @@ VIDEO_EXTS: set[str] = {
 
 # Session cookie configuration (brief Delta 1).
 SESSION_COOKIE_NAME: str = "studio_session"
+# HTTPS logins issue the __Host- prefixed cookie instead (Secure Studio plan,
+# 2026-06-11): the browser only ACCEPTS a __Host-* Set-Cookie when it carries
+# Secure + Path=/ + no Domain, so an insecure (http) origin can never plant or
+# overwrite it. HTTP logins keep the legacy name above, byte-identical to
+# before; deps.current_user reads the __Host- cookie first, then the legacy.
+SECURE_SESSION_COOKIE_NAME: str = "__Host-studio_session"
 SESSION_TTL_SECONDS: int = 7 * 24 * 3600  # ~7 days
 
 
@@ -112,6 +118,26 @@ MAX_UPLOAD_BYTES: int = int(
     os.environ.get("STUDIO_MAX_UPLOAD")
     or _cfg("limits", "max_upload_bytes", 8 * 1024**3)
 )
+
+
+# --- TLS / HTTPS (Secure Studio plan, 2026-06-11) ---------------------------
+# app/serve.py runs a SECOND uvicorn listener on TLS_PORT with app-generated
+# certificates (core/tls.py; stored in .runtime/tls/). Default ON; disable with
+# env STUDIO_TLS=0 (or [server] tls = false). TLS is strictly additive — any
+# failure falls back to the HTTP-only behavior and can never block boot.
+def _env_bool(name: str) -> bool | None:
+    """Parse a boolean env var; None when unset/empty (fall through to config)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+_TLS_ENV = _env_bool("STUDIO_TLS")
+TLS_ENABLED: bool = _TLS_ENV if _TLS_ENV is not None else bool(_cfg("server", "tls", True))
+TLS_PORT: int = int(os.environ.get("STUDIO_TLS_PORT") or _cfg("server", "tls_port", 8443))
+# Where the local CA + leaf certificates live (gitignored under .runtime/).
+TLS_DIR: Path = RUNTIME_DIR / "tls"
 
 
 # --- allowed roots --------------------------------------------------------

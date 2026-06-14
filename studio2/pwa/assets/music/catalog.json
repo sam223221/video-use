@@ -1,0 +1,74 @@
+[
+  {
+    "library_id": "calm_piano_01",
+    "title": "Lovely Piano Song",
+    "artist": "Rafael Krux",
+    "mood": "calm",
+    "duration_s": 95.9,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Romance/Lovely%20Piano%20Song.mp3"
+  },
+  {
+    "library_id": "acoustic_ukulele_01",
+    "title": "Happy Whistling Ukulele",
+    "artist": "Kevin MacLeod",
+    "mood": "acoustic",
+    "duration_s": 123.4,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Upbeat/Happy%20Whistling%20Ukulele.mp3"
+  },
+  {
+    "library_id": "upbeat_city_01",
+    "title": "City Sunshine",
+    "artist": "Bryan Teoh",
+    "mood": "upbeat",
+    "duration_s": 185.0,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Upbeat/City%20Sunshine.mp3"
+  },
+  {
+    "library_id": "cinematic_mountain_01",
+    "title": "Lonely Mountain",
+    "artist": "Rafael Krux",
+    "mood": "cinematic",
+    "duration_s": 190.4,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Epic/Lonely%20Mountain.mp3"
+  },
+  {
+    "library_id": "epic_heroic_01",
+    "title": "Heroic Adventure",
+    "artist": "Rafael Krux",
+    "mood": "epic",
+    "duration_s": 142.9,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Epic/Heroic%20Adventure.mp3"
+  },
+  {
+    "library_id": "ambient_space_01",
+    "title": "Space Ambience",
+    "artist": "Kevin MacLeod",
+    "mood": "ambient",
+    "duration_s": 275.7,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/Electronic/Space%20Ambience.mp3"
+  },
+  {
+    "library_id": "world_rasta_01",
+    "title": "Sunny Rasta",
+    "artist": "Bryan Teoh",
+    "mood": "world",
+    "duration_s": 140.2,
+    "license": "CC0-1.0",
+    "source_url": "https://raw.githubusercontent.com/0lhi/FreePD/stream/World/Sunny%20Rasta.mp3"
+  },
+  {
+    "library_id": "playful_adventure_01",
+    "title": "Big person, tiny cities (world map's theme)",
+    "artist": "Komiku",
+    "mood": "playful",
+    "duration_s": 297.1,
+    "license": "CC0-1.0",
+    "source_url": "https://freemusicarchive.org/music/Komiku/Its_time_for_adventure__vol_3/Komiku_-_Its_time_for_adventure_vol_3_-_03_Big_person_tiny_cities_world_maps_theme/"
+  }
+]

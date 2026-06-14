@@ -103,6 +103,34 @@ no error — confirming subscription auth, the in-process MCP tools routed throu
 - Hard Rule 10 (parallel animation sub-agents) is NOT reproduced in v1; the
   prompt states this and write_edl enforces overlays-only-if-pre-rendered.
 
+## Bug fix (2026-06-11, P1) — timeline tool image shape + downscale guard
+- **tools.py — MCP image-block shape (the "every timeline call errors" bug):**
+  `timeline_tool` embedded the PNG as an Anthropic-API-style block
+  `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`, but the
+  in-process SDK server (`claude_agent_sdk` `call_tool` conversion) expects the
+  MCP shape and indexes `item["data"]`/`item["mimeType"]` → `KeyError: 'data'`
+  AFTER the tool returned → `isError=True` on EVERY call even though the PNG
+  rendered. Now emits `{"type":"image","data":<b64>,"mimeType":"image/png"}` —
+  verified through the real SDK conversion path (isError=False, proper
+  `ImageContent`).
+- **tools.py — `_fit_image_for_model` downscale guard:** now that images really
+  reach the model, oversized canvases (large `n_frames` filmstrips) are guarded
+  against the API's ~8000px-per-side image limit: over **7500px** (safety
+  margin) on either side the PNG is LANCZOS-downscaled preserving aspect and
+  re-encoded, with a one-line `studio.agent` INFO log; within limits the bytes
+  pass through **byte-identical** (no recompression). A failed embed (corrupt
+  PNG, PIL error) degrades to the text-only result with a WARNING log instead
+  of failing the tool.
+- **Companion (AUTHORIZED skill-layer fix, same pass):** `helpers/timeline_view.py`
+  now probes the clip duration (ffprobe), clamps `end` just inside EOF (0.1s
+  margin — the last decodable frame sits one frame interval before the container
+  duration), exits with a clean one-line error when `start >= duration`, and
+  captures ffmpeg stderr (last ~5 lines in the error) instead of
+  `stderr=DEVNULL` + uncaught `CalledProcessError`. So a past-EOF range is now
+  either a successful clamped PNG or a concise diagnosable tool error — never an
+  opaque crash. The helper stays standalone-compatible (CLI behavior unchanged
+  for valid inputs).
+
 ## Security fixes (2026-06-10, QA P2 — red-thread pass)
 - **tools.py — `render` `output` path confinement:** the tool's `output`
   argument was used verbatim (relative → `edit_dir/…`, but an ABSOLUTE path was

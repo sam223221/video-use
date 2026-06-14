@@ -16,11 +16,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import secrets
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from PIL import Image
 
 from .. import security
 from ..core import jobs
@@ -36,6 +39,12 @@ if TYPE_CHECKING:  # avoid an import cycle (session imports tools)
 
 # A progress callback: (tool_name, payload) -> awaitable. The session injects it.
 ProgressCb = Callable[[str, dict], Awaitable[None]]
+
+_log = logging.getLogger("studio.agent")
+
+# The model API rejects images larger than ~8000px on either side; very wide
+# filmstrips (large n_frames) can exceed that. 7500 leaves a safety margin.
+_MAX_IMAGE_DIM = 7500
 
 # How long the ask_user tool blocks awaiting a browser answer before giving up so
 # the per-folder chat lock is never held forever (brief: 600 s).
@@ -75,6 +84,32 @@ def _ok(text: str, extra: dict | None = None) -> dict[str, Any]:
 
 def _err(message: str) -> dict[str, Any]:
     return {"content": [_text(f"ERROR: {message}")], "is_error": True}
+
+
+def _fit_image_for_model(png_bytes: bytes, origin_name: str) -> bytes:
+    """Downscale a PNG that exceeds the model-visible pixel limit.
+
+    Within limits the original bytes pass through UNTOUCHED (byte-identical, no
+    recompression). Over ``_MAX_IMAGE_DIM`` on either side the image is
+    LANCZOS-downscaled preserving aspect ratio, re-encoded as PNG, and a
+    one-line INFO is logged.
+    """
+    with Image.open(BytesIO(png_bytes)) as img:
+        w, h = img.size
+        if w <= _MAX_IMAGE_DIM and h <= _MAX_IMAGE_DIM:
+            return png_bytes
+        scale = _MAX_IMAGE_DIM / float(max(w, h))
+        new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        if img.mode in ("P", "1"):  # palette/bilevel resample poorly with LANCZOS
+            img = img.convert("RGB")
+        resized = img.resize(new_size, Image.LANCZOS)
+    buf = BytesIO()
+    resized.save(buf, "PNG", optimize=True)
+    _log.info(
+        "timeline PNG downscaled for the model: %s %dx%d -> %dx%d",
+        origin_name, w, h, new_size[0], new_size[1],
+    )
+    return buf.getvalue()
 
 
 def _resolve_source(folder: Path, source: str) -> Path | None:
@@ -373,13 +408,18 @@ def build_server(
             png_path = Path(res["png"])
             content: list[dict[str, Any]] = [_text(f"timeline PNG saved: {png_path}")]
             try:
-                data = base64.standard_b64encode(png_path.read_bytes()).decode("ascii")
-                content.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/png", "data": data},
-                })
-            except OSError:
-                pass
+                png_bytes = _fit_image_for_model(png_path.read_bytes(), png_path.name)
+                data = base64.standard_b64encode(png_bytes).decode("ascii")
+                # MCP image-block shape — the in-process SDK server converts via
+                # item["data"]/item["mimeType"] (claude_agent_sdk call_tool). The
+                # previous Anthropic-API {"source": {...}} shape raised
+                # KeyError:'data' AFTER the tool returned, making EVERY timeline
+                # call isError=True even though the PNG rendered.
+                content.append({"type": "image", "data": data, "mimeType": "image/png"})
+            except Exception as exc:  # noqa: BLE001 — degrade to the text-only result
+                _log.warning(
+                    "timeline PNG embed skipped (%s): %r", png_path.name, exc
+                )
             return {"content": content}
         except Exception as exc:  # noqa: BLE001
             return _err(f"timeline_view failed: {exc}")

@@ -14,6 +14,11 @@ python-multipart==0.0.29
 qrcode[pil]==8.2
 claude-agent-sdk==0.2.87
 
+# Secure Studio (2026-06-11): app-generated local CA + leaf certificates for
+# the HTTPS listener (app/core/tls.py, served by app/serve.py on :8443).
+# cp314 wheel confirmed importable in the venv before pinning.
+cryptography==48.0.0
+
 # Pinned transitively-required wheel for reproducibility (qrcode[pil] -> pillow).
 pillow==12.2.0
 

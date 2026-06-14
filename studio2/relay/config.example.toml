@@ -1,0 +1,100 @@
+# Studio v2 relay — example configuration
+#
+# Copy to studio2/relay/config.toml (gitignored — keep real passwords ONLY
+# there) and edit. start.bat does NOT require this file; sensible defaults
+# apply. Every value here can also be supplied via an environment variable
+# (the env var wins). app/settings.py resolves these.
+
+[server]
+# Interface uvicorn binds. 0.0.0.0 = reachable on the LAN (required for phone
+# access). Override with env STUDIO2_HOST.
+host = "0.0.0.0"
+# HTTP port. Studio v1 keeps 8420/8443 — both stacks run side by side on one
+# host. Override with env STUDIO2_PORT. If you change this, also update the
+# firewall rule (see open-firewall.ps1).
+port = 8520
+# HTTPS on the LAN. v2 serves https on tls_port ALONGSIDE plain http (same
+# app, same process) using its OWN server certificate signed by Studio v1's
+# certificate authority — phones that completed v1's Secure Setup trust v2
+# immediately, with no new certificate install. Any TLS failure (including a
+# missing v1 CA) falls back to HTTP-only and never blocks startup.
+# Override with env STUDIO2_TLS (0/false disables) / STUDIO2_TLS_PORT.
+# If you change tls_port, also update the firewall rule (open-firewall.ps1).
+tls = true
+tls_port = 8543
+# Where the SHARED Studio v1 certificate authority lives (READ-ONLY — v2
+# never writes there). Default: ../../studio/.runtime/tls relative to this
+# folder (i.e. <repo>/studio/.runtime/tls). A relative path resolves against
+# studio2/relay/. Override with env STUDIO2_CA_DIR. Only set this if the v1
+# CA lives somewhere unusual.
+# ca_dir = "../../studio/.runtime/tls"
+
+[users]
+# Multi-user login accounts for Studio v2 (independent of v1's — copy your
+# real usernames/passwords into studio2/relay/config.toml once). Each entry
+# is  username = "password"  (case-sensitive). Add as many as you like.
+# Passwords are compared in constant time and are never logged.
+#
+# A single account can also come from env STUDIO2_USERNAME / STUDIO2_PASSWORD
+# (or an [auth] table); with nothing configured at all, a one-run "admin"
+# password is generated and printed in the startup banner.
+alice = "change-me-please"
+bob = "another-strong-password"
+
+# [auth]  (single account — optional; the [users] table above is preferred)
+# username = "admin"
+# password = "change-me"
+
+[transcribe]
+# Transcription (M2): the relay calls ElevenLabs Scribe on the device's behalf
+# so the API key NEVER reaches the browser. Audio (not video) is the ONE thing
+# that leaves the phone, and only with an explicit per-clip user tap. Every
+# value here can also come from an environment variable (env wins).
+#
+# Master switch. false -> the Transcribe button is disabled everywhere and the
+# relay returns 403 transcribe_disabled. Default: true (but still off until a
+# key is configured below).
+# enabled = true
+#
+# The ElevenLabs API key. PUT THE REAL KEY ONLY in the gitignored
+# studio2/relay/config.toml — NEVER in this committed example. Env vars win and
+# are preferred: STUDIO2_ELEVENLABS_API_KEY, then ELEVENLABS_API_KEY. The key
+# is never logged, never echoed in an error, never exposed by /api/status.
+# api_key = "sk_your_elevenlabs_key_here"
+#
+# Scribe model id. Default: scribe_v2 (current batch model, word timestamps;
+# scribe_v1 is deprecated upstream). A legacy scribe_v1 pin is auto-upgraded
+# to scribe_v2; any other explicit pin is honored verbatim.
+# model_id = "scribe_v2"
+#
+# Pin a language (ISO-639-1/3, e.g. "en", "fo"). Empty = auto-detect per clip,
+# which is the recommended setting for mixed Faroese/English footage — the
+# detected language and confidence are recorded in each transcript.
+# language = ""
+#
+# Speaker labels (diarization). Default OFF in M2.
+# diarize = false
+#
+# Cost-abuse guards (a stolen login cannot burn the EL account). Per-upload:
+# hard byte cap + a soft cap on the declared clip duration. Per-process daily:
+# call count + total audio. The daily counters reset at local midnight and on
+# restart (household scale). Defaults below bound worst-case exposure to a few
+# dollars/day even fully scripted.
+# max_audio_mib = 256        # hard per-upload byte cap (streamed enforcement)
+# max_duration_min = 180     # soft per-call cap on the device-declared duration
+# daily_call_cap = 24        # max transcription calls per day
+# daily_audio_mib_cap = 1024 # max audio (MiB) transcribed per day (1 GiB)
+
+[render]
+# The M3 RENDER TIER feature flag. DEFAULT false — keep it OFF until the M3
+# render tier (output-shape + music) SHIPS, i.e. once the M3 device executors
+# (pwa/bridge.js) for set_output_format / set_clip_fit / list_music_library /
+# add_music / update_music / remove_music exist. While OFF, those six agent
+# tools are NOT registered with the model (the surface is the 9 tools of M2 +
+# Agent Vision + base), the system prompt OMITS its format/music sections, and
+# the bridge allowlist excludes the six names — so the agent never offers
+# format or music it cannot deliver. Turning it ON exposes all six (surface 15)
+# and the matching prompt sections. Env STUDIO2_RENDER_ENABLED overrides this
+# (1/true/yes/on to enable). Leave it OFF on the relay until the M3 frontend is
+# verified.
+# enabled = false

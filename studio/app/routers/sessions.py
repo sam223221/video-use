@@ -20,6 +20,7 @@ only manages the session container itself.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends
@@ -27,10 +28,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .. import security
-from ..core import sessions
+from ..core import applog, sessions
 from . import deps
 
 router = APIRouter(prefix="/api", tags=["sessions"])
+
+# Session lifecycle diagnostics (rotating file log; see core/applog.py).
+# Create/open/delete each write one id+owner line — observation only.
+_log = logging.getLogger("studio.session")
 
 
 class CreateBody(BaseModel):
@@ -72,7 +77,15 @@ def create_session(
     try:
         sess = sessions.create(user, name)
     except OSError as exc:
+        _log.error(
+            "create owner=%s outcome=create_failed reason=%s",
+            user, applog.sanitize_log_value(str(exc), 200),
+        )
         raise deps.http_error(500, "create_failed", f"could not create session: {exc}")
+    _log.info(
+        'create id=%s owner=%s name="%s"',
+        sess.id, user, applog.sanitize_log_value(name, 80),
+    )
     return JSONResponse(
         status_code=201,
         content={
@@ -99,6 +112,7 @@ def open_session(
     sess = sessions.get(user, session_id)
     if sess is None:  # raced with a concurrent delete
         raise deps.http_error(404, "session_not_found", "session not found")
+    _log.info("open id=%s owner=%s", sess.id, user)
     return {
         "id": sess.id,
         "name": sess.name,
@@ -140,4 +154,7 @@ async def delete_session(
     """
     if not await sessions.delete(user, session_id):
         raise deps.http_error(404, "session_not_found", "session not found")
+    _log.info(
+        "delete id=%s owner=%s", applog.sanitize_log_value(session_id, 80), user
+    )
     return {"ok": True}

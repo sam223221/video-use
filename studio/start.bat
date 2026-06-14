@@ -11,10 +11,12 @@ REM  What it does:
 REM    1. Creates studio\.venv with Python 3.14 (py -3.14) if missing.
 REM    2. pip install -r requirements.txt only on first run / when deps change
 REM       (the download is ~90 MB+; subsequent launches skip it).
-REM    3. Detects the PC LAN IPv4, prints localhost + LAN URLs, and a scannable
-REM       QR of the LAN URL in the terminal.
-REM    4. Opens the default browser to the localhost URL.
-REM    5. Binds uvicorn to 0.0.0.0:8420.
+REM    3. Opens the default browser to the localhost URL.
+REM    4. Runs `python -m app.serve` — HTTP on 0.0.0.0:8420 AND HTTPS on
+REM       0.0.0.0:8443 (app-generated local certs; Secure Studio). The server's
+REM       own startup banner prints the URLs + a scannable QR + the login
+REM       credentials — it is the SINGLE source of IP/URL truth (the old
+REM       bat-side IP detection / QR block was removed on purpose).
 REM
 REM  Auth: the server prints a startup banner with the login username + password
 REM  (from studio\config.toml [users]). Open the URL / scan the QR, then sign in
@@ -112,62 +114,51 @@ if "%NEED_INSTALL%"=="1" (
     echo [setup] Dependencies already installed ^(skipping^).
 )
 
-REM --- 3. detect LAN IPv4 (prefer a private 192/10/172 address) --------------
-set "LANIP="
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$a=Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' -and ($_.PrefixOrigin -eq 'Dhcp' -or $_.PrefixOrigin -eq 'Manual') } | Sort-Object { if ($_.IPAddress -like '192.168.*') {0} elseif ($_.IPAddress -like '10.*') {1} elseif ($_.IPAddress -like '172.*') {2} else {3} } | Select-Object -First 1 -ExpandProperty IPAddress; if ($a) { $a }"`) do set "LANIP=%%I"
-if not defined LANIP set "LANIP=127.0.0.1"
-
+REM --- 3. open the default browser to the localhost URL -----------------------
+REM     (The LAN IP/URL detection + terminal QR moved INTO the server: the
+REM      startup banner printed below is the single source of IP truth, so the
+REM      bat-side duplicate detector is gone. Secure Studio also prints the
+REM      https URLs + the /setup hint there.)
 set "LOCAL_URL=http://127.0.0.1:%PORT%/"
-set "LAN_URL=http://%LANIP%:%PORT%/"
-
 echo(
-echo  ------------------------------------------------------------
-echo   Local : %LOCAL_URL%
-echo   LAN   : %LAN_URL%
-echo   Port  : %PORT%   ^(bind 0.0.0.0 - reachable on your Wi-Fi^)
-echo  ------------------------------------------------------------
-echo(
-echo   Scan this QR on your phone ^(same Wi-Fi^) to open Studio, then sign in
-echo   with the username/password shown in the server startup banner below.
-echo(
-
-REM --- print a terminal QR of the LAN URL using the installed qrcode lib -----
-REM stdout is forced to UTF-8 in-process so the block glyphs encode regardless
-REM of the active console codepage.
-"%VENV_PY%" -c "import io,sys;sys.stdout=io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8');import qrcode;qr=qrcode.QRCode(border=2);qr.add_data('%LAN_URL%');qr.make(fit=True);qr.print_ascii(out=sys.stdout,invert=True)"
-echo(
-echo   First time on the LAN? Open the firewall port once ^(admin terminal^):
+echo   First time on the LAN? Open the firewall ports once ^(admin terminal^):
 echo     powershell -ExecutionPolicy Bypass -File "%STUDIO_DIR%\open-firewall.ps1"
 echo(
-
-REM --- 4. open the default browser to the localhost URL ----------------------
 start "" "%LOCAL_URL%"
 
-REM --- 4b. helper-dependency self-check (FAIL LOUD before serving) -----------
+REM --- 4b. dependency self-check (FAIL LOUD before serving) -------------------
 REM     runner.py launches helpers/*.py with THIS interpreter (sys.executable),
 REM     so the helper deps must be importable HERE. If they are not, the server
 REM     would boot fine and then crash EVERY helper with ModuleNotFoundError
-REM     (the recurring numpy/requests bug). Verify up front and abort with the
-REM     exact remedy instead of shipping a half-working server.
-"%VENV_PY%" -c "import requests, numpy, matplotlib, PIL, librosa" >nul 2>&1
+REM     (the recurring numpy/requests bug). `cryptography` is checked too:
+REM     app/core/tls.py imports it at module level and BOTH entrypoints
+REM     (app.serve and app.main via routers/tls.py) import tls.py, so a broken
+REM     install would block ALL boot — even with STUDIO_TLS=0 — with a raw
+REM     stack trace instead of this message. Verify up front and abort with
+REM     the exact remedy instead of shipping a half-working server.
+"%VENV_PY%" -c "import requests, numpy, matplotlib, PIL, librosa, cryptography" >nul 2>&1
 if errorlevel 1 (
-    echo [error] Helper dependencies are not importable in the venv python:
+    echo [error] Required dependencies are not importable in the venv python:
     echo           "%VENV_PY%"
-    echo         The helpers ^(transcribe / timeline_view / render / grade^) would
-    echo         crash with ModuleNotFoundError. Reinstall them with:
+    echo         The server would fail to boot ^(cryptography^), or the helpers
+    echo         ^(transcribe / timeline_view / render / grade^) would crash with
+    echo         ModuleNotFoundError. Reinstall them with:
     echo           "%VENV_PY%" -m pip install -r "%REQ%"
     echo         If that still fails, delete studio\.venv and re-run start.bat.
     goto :fail
 )
 
-REM --- 5. run uvicorn on 0.0.0.0:8420 (no ANTHROPIC_API_KEY set => MAX plan) -
-REM     Runs in the FOREGROUND of this console: the startup banner (with the
-REM     login username + password to sign in with) stays visible and uvicorn's
-REM     request logs / tracebacks / subprocess output stream live into this
-REM     window. This call blocks until the server exits.
-echo  [run] Starting server on 0.0.0.0:%PORT%  ^(Ctrl+C to stop^)
+REM --- 5. run the dual-listener server (no ANTHROPIC_API_KEY set => MAX plan) -
+REM     app.serve runs HTTP on 0.0.0.0:8420 AND HTTPS on 0.0.0.0:8443 (Secure
+REM     Studio; app-generated certs in .runtime\tls). STUDIO_TLS=0 or any TLS
+REM     failure falls back to HTTP-only, identical to the old uvicorn line.
+REM     Runs in the FOREGROUND of this console: the startup banner (URLs + QR +
+REM     the login username/password to sign in with) stays visible and request
+REM     logs / tracebacks / subprocess output stream live into this window.
+REM     This call blocks until the server exits; Ctrl+C stops BOTH listeners.
+echo  [run] Starting server on 0.0.0.0:%PORT% ^(+ https on 8443^)  ^(Ctrl+C to stop^)
 echo(
-"%VENV_PY%" -m uvicorn app.main:app --host 0.0.0.0 --port %PORT%
+"%VENV_PY%" -m app.serve
 
 echo(
 echo  ------------------------------------------------------------

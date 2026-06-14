@@ -13,6 +13,17 @@ host = "0.0.0.0"
 # If you change this, also update the firewall rule (see open-firewall.ps1).
 port = 8420
 
+# HTTPS on the LAN (Secure Studio). The app generates a local certificate
+# authority + server certificate under studio/.runtime/tls/ and serves HTTPS
+# on tls_port ALONGSIDE plain HTTP (same app, same process). Phones do a
+# one-time trust walkthrough at http://<this-pc-ip>:8420/setup — after that,
+# uploads survive a locked screen (the Screen Wake Lock API needs a secure
+# context). Any TLS failure falls back to HTTP-only and never blocks startup.
+# Override with env STUDIO_TLS (0/false disables) / STUDIO_TLS_PORT.
+# If you change tls_port, also update the firewall rule (open-firewall.ps1).
+tls = true
+tls_port = 8443
+
 [paths]
 # Folders the file browser / uploads / media serving are allowed to touch.
 # Path-traversal is rejected outside these roots (ARCHITECTURE.md §9.2).

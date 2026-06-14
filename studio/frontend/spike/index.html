@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0b0a09" />
+  <meta name="description" content="video-use Studio — one-time phone capability test (M0 spike)." />
+  <title>Phone Editing Test — video-use Studio</title>
+
+  <!-- Same inline SVG favicon as the app shell (zero extra requests). -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a00'/%3E%3Cpath d='M12 9.5l11 6.5-11 6.5z' fill='%231a0d00'/%3E%3C/svg%3E" />
+
+  <!-- =====================================================================
+       THROWAWAY — M0 SPIKE. DELETE THIS WHOLE FOLDER AFTER M0 CONCLUDES.
+
+       This page exists to answer four questions about what an iPhone's
+       browser can really do with big videos, before Studio v2 (on-device
+       editing) is built. It is served login-free by the existing Studio v1
+       server's static mount at /static/spike/index.html — zero backend
+       changes. (The full file name is required: the mount serves files only,
+       no directory indexes, so /static/spike/ alone is a 404.)
+       Everything runs locally on the phone; nothing is uploaded anywhere.
+
+       Plan: PM/plan-2026-06-11-m0-spike.md. See DOCUMENT.md in this folder.
+
+       Self-contained on purpose: no shared stylesheet, no fonts, no CDN —
+       the ONLY other files loaded are ./spike.js and the vendored
+       ./mediabunny.js in this same folder.
+  ====================================================================== -->
+  <style>
+    :root {
+      --bg: #0b0a09;
+      --bg-card: #161311;
+      --bg-inset: #1f1a16;
+      --line: #353029;
+      --text: #f4f0e8;
+      --text-dim: #b3a99a;
+      --accent: #ff5a00;
+      --accent-soft: #ff7a2e;
+      --good: #6fd18a;
+      --bad: #ff8d7a;
+      --warn-bg: #2b1d10;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      font-size: 1rem;
+    }
+    [hidden] { display: none !important; }
+
+    .wrap { max-width: 44rem; margin: 0 auto; padding: 1.25rem 1rem 5rem; }
+
+    .brand { display: inline-flex; align-items: center; gap: .5rem; color: var(--text-dim); font-size: .85rem; letter-spacing: .04em; text-transform: uppercase; }
+    .brand__mark { width: .9rem; height: .9rem; border-radius: .25rem; background: var(--accent); flex: none; }
+    h1 { font-size: 1.65rem; line-height: 1.2; margin: .5rem 0 .25rem; letter-spacing: -.01em; }
+    .lede { color: var(--text-dim); margin: .25rem 0 0; }
+    .device-line { color: var(--text-dim); font-size: .75rem; margin-top: .75rem; word-break: break-all; }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--line);
+      border-radius: .9rem;
+      padding: 1.1rem 1rem 1.2rem;
+      margin-top: 1.25rem;
+    }
+    .card h2 { margin: 0 0 .25rem; font-size: 1.15rem; line-height: 1.3; }
+    .card h2 .num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 1.6rem; height: 1.6rem; margin-right: .5rem;
+      border-radius: 50%; background: var(--accent); color: #1a0d00;
+      font-size: .95rem; flex: none; vertical-align: -0.25rem;
+    }
+    .card .why { color: var(--text-dim); margin: .25rem 0 .75rem; font-size: .92rem; }
+
+    ol.steps { margin: .5rem 0 1rem; padding-left: 1.4rem; }
+    ol.steps li { margin: .35rem 0; }
+    ol.steps b { color: var(--accent-soft); font-weight: 600; }
+
+    /* Buttons: ≥44px tap targets, visible focus */
+    button, .linkbtn {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 44px; padding: .55rem 1.1rem;
+      border-radius: .65rem; border: 1px solid var(--line);
+      background: var(--bg-inset); color: var(--text);
+      font: inherit; font-weight: 600; cursor: pointer;
+      text-decoration: none;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #1a0d00; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button:focus-visible, .linkbtn:focus-visible, input:focus-visible {
+      outline: 3px solid var(--accent-soft); outline-offset: 2px;
+    }
+    .btn-row { display: flex; flex-wrap: wrap; gap: .6rem; margin: .5rem 0; }
+
+    .status { min-height: 1.4rem; margin: .5rem 0 0; color: var(--accent-soft); font-size: .95rem; }
+    .need-note { color: var(--text-dim); font-size: .85rem; margin: .25rem 0 0; }
+
+    .errbox {
+      margin-top: .75rem; padding: .65rem .8rem;
+      background: #2a1310; border: 1px solid #5e2a20; border-radius: .6rem;
+      color: var(--bad); font-size: .9rem; word-break: break-word;
+    }
+
+    .banner {
+      margin-top: 1rem; padding: .7rem .9rem;
+      border-radius: .7rem; border: 1px solid var(--line);
+      background: var(--warn-bg); font-size: .92rem;
+    }
+    .banner--error { background: #2a1310; border-color: #5e2a20; color: var(--bad); }
+
+    /* Tables */
+    .tablewrap { overflow-x: auto; margin-top: .75rem; -webkit-overflow-scrolling: touch; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    caption { text-align: left; color: var(--text-dim); font-size: .8rem; padding-bottom: .35rem; }
+    th, td { text-align: left; padding: .4rem .55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    thead th { color: var(--text-dim); font-weight: 600; }
+    tbody th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
+    td { word-break: break-word; }
+    td.diff { color: var(--bad); font-weight: 700; }
+
+    .verdict {
+      margin-top: .75rem; padding: .65rem .8rem; border-radius: .6rem;
+      background: #14241a; border: 1px solid #2c4a36; color: var(--good); font-size: .95rem;
+    }
+    .verdict--bad { background: #2a1310; border-color: #5e2a20; color: var(--bad); }
+    .verdict--warn { background: var(--warn-bg); border-color: #6a4a1f; color: #ffc46b; }
+
+    /* Key/value result lists */
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: .25rem .9rem; margin: .75rem 0 0; font-size: .9rem; }
+    .kv dt { color: var(--text-dim); }
+    .kv dd { margin: 0; word-break: break-word; }
+
+    .checkline { display: flex; align-items: flex-start; gap: .6rem; margin-top: .9rem; }
+    .checkline input { width: 1.5rem; height: 1.5rem; margin-top: .1rem; accent-color: var(--accent); flex: none; }
+
+    .clipbar {
+      margin-top: 1.25rem; padding: .7rem .9rem;
+      border: 1px dashed var(--line); border-radius: .7rem;
+      display: flex; flex-wrap: wrap; align-items: center; gap: .6rem;
+      font-size: .9rem; color: var(--text-dim);
+    }
+    .clipbar b { color: var(--text); word-break: break-all; }
+
+    pre {
+      margin: .75rem 0 0; padding: .75rem;
+      background: var(--bg-inset); border: 1px solid var(--line); border-radius: .6rem;
+      font-size: .72rem; line-height: 1.45; overflow-x: auto;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 24rem; overflow-y: auto;
+    }
+
+    button.danger { border-color: #5e2a20; color: var(--bad); background: transparent; }
+    button.danger--armed { background: #5e2a20; color: var(--text); }
+
+    .visually-hidden-input {
+      position: absolute; width: 1px; height: 1px;
+      overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+    }
+
+    footer { margin-top: 2rem; color: var(--text-dim); font-size: .85rem; }
+    footer a { color: var(--accent-soft); }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+
+    <header>
+      <span class="brand"><span class="brand__mark" aria-hidden="true"></span> video-use Studio · one-time test</span>
+      <h1>Can this phone edit video by itself?</h1>
+      <p class="lede">
+        Four short tests, all on this phone — nothing is uploaded anywhere.
+        Do them top to bottom; each one saves its result as it goes, so nothing
+        is lost even if the page crashes. At the end, copy the results and send
+        them to Sam.
+      </p>
+      <p class="lede"><b>You'll need:</b> one big video (the bigger the better — around 1&nbsp;GB is perfect)
+        that is BOTH in your Photos and saved to the Files app.
+        To save it to Files: open it in <b>Photos → Share → Save to Files</b>.</p>
+      <p class="device-line" id="device-summary"></p>
+    </header>
+
+    <!-- Surfaced problems — never silent -->
+    <div class="banner banner--error" id="global-error" role="alert" hidden>
+      <span id="global-error-text"></span>
+    </div>
+    <div class="banner" id="journal-warning" role="alert" hidden>
+      Heads up: this browser is blocking saved results (private browsing?).
+      The tests still work, but results will NOT survive closing the page —
+      copy them before you leave.
+    </div>
+    <div class="banner" id="restored-banner" role="status" hidden>
+      <span id="restored-text"></span>
+    </div>
+    <div class="banner" id="wake-hint" role="alert" hidden>
+      Please keep the screen ON and stay on this page while the test runs —
+      this phone won't keep it awake automatically.
+    </div>
+
+    <!-- The ONE file input. Buttons below open it; on iPhone a menu appears
+         where you choose Photo Library or Choose File. -->
+    <input type="file" accept="video/*,.mov,.mp4" id="file-input"
+           class="visually-hidden-input" tabindex="-1" aria-hidden="true" />
+
+    <!-- ================================================================ -->
+    <section class="card" aria-labelledby="t1-h">
+      <h2 id="t1-h"><span class="num" aria-hidden="true">1</span>Pick the same clip two ways</h2>
+      <p class="why">Why: when a web page asks for a video, iPhone may quietly hand over a
+        smaller, converted copy instead of the real file. This test shows whether that
+        still happens, by comparing the two ways of picking.</p>
+      <ol class="steps">
+        <li>Tap <b>Pick from Photo Library</b>. In the menu that appears choose
+            <b>Photo Library</b>, then select your big clip and wait — if the phone
+            shows “Preparing…”, that's it converting.</li>
+        <li>Tap <b>Pick from Files</b>. In the menu choose <b>Choose File</b>,
+            then find the SAME clip where you saved it in the Files app.</li>
+        <li>Look at the comparison that appears — differences are highlighted.</li>
+      </ol>
+      <div class="btn-row">
+        <button type="button" class="primary" id="t1-pick-library">Pick from Photo Library</button>
+        <button type="button" class="primary" id="t1-pick-files">Pick from Files</button>
+      </div>
+      <p class="status" id="t1-status" role="status" aria-live="polite"></p>
+      <div class="errbox" id="t1-error" hidden></div>
+      <div class="tablewrap" id="t1-results" hidden>
+        <table>
+          <caption>The same clip, picked two ways. Highlighted rows differ.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Property</th>
+              <th scope="col">Photo Library</th>
+              <th scope="col">Files app</th>
+            </tr>
+          </thead>
+          <tbody id="t1-tbody"></tbody>
+        </table>
+      </div>
+      <p class="verdict" id="t1-verdict" hidden></p>
+    </section>
+
+    <!-- Which clip will tests 2/3 use -->
+    <div class="clipbar">
+      <span>Clip for the next tests: <b id="clip-name">no clip picked yet</b></span>
+      <button type="button" id="clip-pick">Choose a different clip</button>
+    </div>
+
+    <!-- ================================================================ -->
+    <section class="card" aria-labelledby="t2-h">
+      <h2 id="t2-h"><span class="num" aria-hidden="true">2</span>Copy it in, save it back out</h2>
+      <p class="why">Why: editing on the phone means the browser must hold its own working copy
+        of the video, and afterwards save the result back into Photos. This test does a full
+        round trip with your big clip.</p>
+      <ol class="steps">
+        <li>Tap <b>Start the copy</b> and wait — for a 1&nbsp;GB clip this can take a while.
+            Keep the screen on.</li>
+        <li>When it finishes, tap <b>Save to Photos</b>. In the share sheet that opens,
+            scroll down and tap <b>Save Video</b>.</li>
+        <li>Open the Photos app, find the saved video, and check it plays.
+            Then come back and tick the box.</li>
+      </ol>
+      <p class="need-note" id="t2-need">First pick a clip in test 1 (the <b>Files</b> pick is the right one — it's the original).</p>
+      <div class="btn-row">
+        <button type="button" class="primary" id="t2-start">Start the copy</button>
+        <button type="button" id="t2-share">Save to Photos</button>
+      </div>
+      <p class="status" id="t2-status" role="status" aria-live="polite"></p>
+      <div class="errbox" id="t2-error" hidden></div>
+      <div id="t2-results" hidden></div>
+      <label class="checkline">
+        <input type="checkbox" id="t2-confirm" />
+        <span>I checked the Photos app — the saved video is there and it plays.</span>
+      </label>
+    </section>
+
+    <!-- ================================================================ -->
+    <section class="card" aria-labelledby="t3a-h">
+      <h2 id="t3a-h"><span class="num" aria-hidden="true">3</span>Cut out a 30-second piece</h2>
+      <p class="why">Why: this is the heart of the future editor — cutting a piece out of a big
+        video WITHOUT re-encoding it (no quality loss, and it should be fast). The cut is taken
+        from around the middle of the clip and saved as a new video.</p>
+      <ol class="steps">
+        <li>Tap <b>Cut a 30-second piece</b> and wait. The page then CHECKS the
+            result file itself and tells you whether it came out healthy.</li>
+        <li>Tap <b>Save the cut to Photos</b>, then <b>Save Video</b> in the share sheet.</li>
+        <li>Open Photos, play the cut — check picture AND sound — then tick the box.</li>
+      </ol>
+      <p class="need-note">Heads up: the sound may stop a second or two before the picture does
+        at the very end of the cut — that is expected (the picture has to end on a clean frame
+        boundary, so it runs slightly past where the sound stops), not a bug.</p>
+      <p class="need-note" id="t3a-need">First pick a clip in test 1, or run test 2 (its copy can be used).</p>
+      <div class="btn-row">
+        <button type="button" class="primary" id="t3a-start">Cut a 30-second piece</button>
+        <button type="button" id="t3a-share">Save the cut to Photos</button>
+        <a class="linkbtn" id="t3a-download" hidden>Download the cut (backup option)</a>
+      </div>
+      <p class="status" id="t3a-status" role="status" aria-live="polite"></p>
+      <div class="errbox" id="t3a-error" hidden></div>
+      <p class="verdict" id="t3a-verify" role="status" hidden></p>
+      <div id="t3a-results" hidden></div>
+      <label class="checkline">
+        <input type="checkbox" id="t3a-confirm" />
+        <span>I played the cut in Photos — picture and sound are fine.</span>
+      </label>
+    </section>
+
+    <!-- ================================================================ -->
+    <section class="card" aria-labelledby="t3b-h">
+      <h2 id="t3b-h"><span class="num" aria-hidden="true">4</span>What this phone supports + speed test</h2>
+      <p class="why">Why: some future features (color looks, burned-in subtitles) need the phone
+        to re-encode video. The table below was gathered automatically when the page opened;
+        the button runs a real re-encode of up to a minute of your clip to measure speed.
+        <b>This is the heaviest test — run it last.</b> If the page suddenly reloads during it,
+        that's a result too (it gets recorded).</p>
+      <div class="tablewrap">
+        <table>
+          <caption>What this phone's browser supports (gathered automatically)</caption>
+          <tbody id="t3b-matrix-tbody"></tbody>
+        </table>
+      </div>
+      <ol class="steps">
+        <li>Tap <b>Run the speed test</b> and leave the phone alone with the screen on —
+            it can take a few minutes.</li>
+      </ol>
+      <p class="need-note" id="t3b-need">First pick a clip in test 1, or run test 2 (its copy can be used).</p>
+      <div class="btn-row">
+        <button type="button" class="primary" id="t3b-start">Run the speed test</button>
+      </div>
+      <p class="status" id="t3b-status" role="status" aria-live="polite"></p>
+      <div class="errbox" id="t3b-error" hidden></div>
+      <p class="verdict" id="t3b-verify" role="status" hidden></p>
+      <div id="t3b-results" hidden></div>
+    </section>
+
+    <!-- ================================================================ -->
+    <section class="card" aria-labelledby="send-h">
+      <h2 id="send-h"><span class="num" aria-hidden="true">✓</span>Send the results to Sam</h2>
+      <ol class="steps">
+        <li>Tap <b>Copy results</b>.</li>
+        <li>Paste into a message to Sam (long-press → Paste).</li>
+      </ol>
+      <div class="btn-row">
+        <button type="button" class="primary" id="copy-json">Copy results</button>
+      </div>
+      <p class="status" id="copy-status" role="status" aria-live="polite"></p>
+      <pre id="json-pre" aria-label="Results as JSON (same data the Copy button copies)"></pre>
+      <div class="btn-row" style="margin-top:1rem">
+        <button type="button" class="danger" id="reset-results">Reset all results</button>
+      </div>
+      <p class="need-note">Reset also deletes the big working copies this page made,
+        freeing the space on the phone.</p>
+    </section>
+
+    <footer>
+      <p>This is a one-time test page (M0 spike) — it will be deleted once the
+         results are in. Nothing here leaves the phone.</p>
+      <p><a href="/">‹ Back to Studio</a></p>
+    </footer>
+
+  </main>
+
+  <script type="module" src="./spike.js"></script>
+</body>
+</html>

@@ -102,8 +102,34 @@ async function request(method, path, { body, headers, signal, raw } = {}) {
   if (raw) return res;
   if (res.status === 204) return null;
   const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return res.json();
-  return res.text();
+  try {
+    return ct.includes("application/json") ? await res.json() : await res.text();
+  } catch (err) {
+    // BODY-READ GUARD (2026-06-10 incident fix). A fetch can SUCCEED — status
+    // 200, headers in — and the body read still fail: the connection dies (or a
+    // reload kills a hung response) between headers and body, and res.json()
+    // rejects with a raw TypeError ("Load failed" on iOS Safari). That raw
+    // TypeError escaped this seam un-normalized, so upload.js classified it
+    // PERMANENT (not an ApiError) → zero retries, no Resume — a dead row for a
+    // chunk the server had already committed. Post-fetch read failures are
+    // network failures: normalize them to the same transient, retryable
+    // ApiError(0, "network") the fetch guard above produces. This also folds in
+    // truncated/malformed JSON on a 2xx — indistinguishable from a torn body,
+    // and our backend never emits invalid JSON on success. An AbortError
+    // (user-cancel / watchdog abort mid-read) passes through untouched so the
+    // cancel path keeps its short-circuit identity.
+    //
+    // Coverage note for the streaming paths below: streamPost() needs no new
+    // guard — its fetch, its !res.ok normalizeError() (internally try/caught),
+    // and its reader.read() loop ALL already convert non-abort failures into
+    // ApiError(0, "network"/"stream") via onError. normalizeError()'s own
+    // res.json() sits inside try/catch by design. openEventSource() is
+    // EventSource (auto-reconnect; no body read to guard). raw:true responses
+    // hand the un-read Response to the caller on purpose (media probing) —
+    // guarding there would change streaming semantics, so they are exempt.
+    if (err && err.name === "AbortError") throw err;
+    throw new ApiError(0, "network", "Connection dropped while receiving the server's reply.");
+  }
 }
 
 export const api = {

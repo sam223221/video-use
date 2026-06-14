@@ -21,9 +21,20 @@ from ..core import sessions
 
 
 def current_user(request: Request) -> str | None:
-    """Return the authenticated username from the session cookie, or None."""
-    token = request.cookies.get(settings.SESSION_COOKIE_NAME)
-    return security.verify_session(token)
+    """Return the authenticated username from the session cookie, or None.
+
+    Secure Studio (2026-06-11): https logins carry ``__Host-studio_session``
+    (Secure, so browsers only send it on https) while http logins keep the
+    legacy ``studio_session`` — verify the ``__Host-`` cookie FIRST, then fall
+    back to the legacy name, so a phone hopping between the http bootstrap
+    origin and the https origin stays signed in on both. Same HMAC token
+    format in both cookies; ``verify_session`` is the single validator.
+    """
+    token = request.cookies.get(settings.SECURE_SESSION_COOKIE_NAME)
+    user = security.verify_session(token)
+    if user is not None:
+        return user
+    return security.verify_session(request.cookies.get(settings.SESSION_COOKIE_NAME))
 
 
 def require_session(request: Request) -> str:
